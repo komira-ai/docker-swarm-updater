@@ -1,5 +1,10 @@
 //! docker-swarm-updater's HTTP API, state files, deploy runner, fetcher and verbs.
 
+pub mod clock;
+pub mod fetch;
+pub mod net;
+pub mod probe;
+
 pub mod cli {
     //! The command line: `serve`, `import`, `probe`.
 
