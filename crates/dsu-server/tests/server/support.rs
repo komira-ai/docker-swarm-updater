@@ -1,16 +1,6 @@
 //! Fakes shared by the integration tests: a clock that moves only when told, a network that
 //! maps host names to chosen addresses and dials the fake release server, and a disk that
 //! reports a chosen amount of free space or fails at a chosen chunk.
-#![allow(
-    dead_code,
-    reason = "each integration test crate uses a subset of the fakes"
-)]
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "test support: a failed unwrap is a failed test"
-)]
-
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::io;

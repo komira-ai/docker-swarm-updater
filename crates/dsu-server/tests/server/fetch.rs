@@ -1,16 +1,9 @@
 //! The fetcher against the fake release server: every `fetch` row of docs/design.md
 //! section 6, plus the clock, network and disk implementations it runs on.
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "tests: a failed unwrap is a failed test"
-)]
-
-mod support;
-
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::support::{ConnectMode, FakeClock, FakeDisk, FakeNetwork};
 use dsu_server::clock::{Clock, SystemClock, with_deadline};
 use dsu_server::fetch::{
     CONNECT_TIMEOUT, Disk, FetchError, Fetched, Fetcher, Limits, MAX_REDIRECTS, READ_TIMEOUT,
@@ -19,7 +12,6 @@ use dsu_server::fetch::{
 use dsu_server::net::{Network, SystemNetwork};
 use dsu_testkit::release::{ReleaseServer, Route};
 use sha2::{Digest as _, Sha256};
-use support::{ConnectMode, FakeClock, FakeDisk, FakeNetwork};
 use url::Url;
 
 const PATH: &str = "/example-org/app/releases/download/v1/app-1-linux-x86_64.image.tar";

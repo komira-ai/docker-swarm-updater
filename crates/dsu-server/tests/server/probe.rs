@@ -1,19 +1,11 @@
 //! `probe` (docs/design.md section 4.3): 200, 503, refused, timeout, a non-loopback URL and a
 //! Unix socket.
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    reason = "tests: a failed unwrap is a failed test"
-)]
-
-mod support;
-
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use crate::support::FakeClock;
 use dsu_server::clock::SystemClock;
 use dsu_server::probe::{ProbeFailure, ProbeOutcome, ProbeTarget, TargetError, probe};
-use support::FakeClock;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UnixListener};
 use tokio::task::JoinHandle;

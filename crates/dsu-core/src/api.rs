@@ -310,11 +310,25 @@ pub struct ListEntry {
     pub floor: Option<Timestamp>,
 }
 
+/// The validity of a key of the trusted root.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyWindow {
+    /// First instant the key is valid.
+    pub from: Timestamp,
+    /// Last instant the key is valid; absent while no end is announced.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<Timestamp>,
+}
+
 /// The body of a 200 `GET /v1/services`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ListResponse {
     /// The services the caller may act on.
     pub services: Vec<ListEntry>,
+    /// The validity of the trusted root's newest key, so a rotation is visible before it
+    /// happens; absent when the trusted root lists no key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trusted_root_newest_key: Option<KeyWindow>,
 }
 
 #[cfg(test)]
@@ -509,9 +523,11 @@ mod tests {
         };
         let json = serde_json::to_value(ListResponse {
             services: vec![entry.clone()],
+            trusted_root_newest_key: None,
         })
         .unwrap();
         assert_eq!(json["services"][0]["service"], "app");
+        assert!(json.get("trusted_root_newest_key").is_none());
         assert!(json["services"][0].get("floor").is_none());
         let full = ListEntry {
             update_state: Some("completed".into()),
@@ -526,6 +542,30 @@ mod tests {
             serde_json::to_string(&HealthBody { ok: true }).unwrap(),
             r#"{"ok":true}"#
         );
+    }
+
+    #[test]
+    fn list_response_carries_the_newest_key_window() {
+        let from: Timestamp = "2026-09-01T00:00:00Z".parse().unwrap();
+        let until: Timestamp = "2027-09-01T00:00:00Z".parse().unwrap();
+        for window in [
+            KeyWindow { from, until: None },
+            KeyWindow {
+                from,
+                until: Some(until),
+            },
+        ] {
+            let response = ListResponse {
+                services: vec![],
+                trusted_root_newest_key: Some(window),
+            };
+            let text = serde_json::to_string(&response).unwrap();
+            assert_eq!(text.contains("until"), window.until.is_some());
+            assert_eq!(
+                serde_json::from_str::<ListResponse>(&text).unwrap(),
+                response
+            );
+        }
     }
 
     #[test]
