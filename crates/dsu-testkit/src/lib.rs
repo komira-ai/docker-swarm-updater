@@ -8,3 +8,5 @@
 
 pub mod docker;
 pub mod mint;
+pub mod oci;
+pub mod registry;
