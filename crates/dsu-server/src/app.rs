@@ -2,7 +2,7 @@
 //! every deploy uses, and the state.
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use dsu_core::config::{Config, ServiceConfig};
 use dsu_core::ids::{Digest, ServiceName};
@@ -10,6 +10,7 @@ use dsu_docker::{DockerClient, DockerError, ServiceView, TaskView};
 use dsu_registry::Registry;
 use dsu_verify::TrustedRoots;
 use rustls::RootCertStore;
+use tokio::task::JoinSet;
 
 use crate::clock::Clock;
 use crate::deployer::Deployer;
@@ -71,6 +72,8 @@ pub struct App {
     pub proxy_uid: u32,
     /// `--allow-local-operator`.
     pub allow_local_operator: bool,
+    /// The tasks that run deploys.
+    deploy_tasks: Mutex<JoinSet<()>>,
 }
 
 impl App {
@@ -102,7 +105,42 @@ impl App {
             deployer: Deployer::new(own_service),
             proxy_uid: params.proxy_uid,
             allow_local_operator: params.allow_local_operator,
+            deploy_tasks: Mutex::new(JoinSet::new()),
         }))
+    }
+
+    /// Runs `deploy` as a task of this updater. Tasks that already ended are reaped first.
+    pub fn spawn_deploy(&self, deploy: impl Future<Output = ()> + Send + 'static) {
+        let mut tasks = self
+            .deploy_tasks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        while tasks.try_join_next().is_some() {}
+        tasks.spawn(deploy);
+    }
+
+    /// Waits until every deploy this updater runs has ended.
+    pub async fn wait_deploys(&self) {
+        let mut tasks = std::mem::take(
+            &mut *self
+                .deploy_tasks
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        while tasks.join_next().await.is_some() {}
+    }
+
+    /// Stops every running deploy where it is and waits until none is left. What a deploy
+    /// wrote to the state directory stays: the next start settles it (section 3.6).
+    pub async fn abort_deploys(&self) {
+        let mut tasks = std::mem::take(
+            &mut *self
+                .deploy_tasks
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        tasks.abort_all();
+        while tasks.join_next().await.is_some() {}
     }
 
     /// The configured service called `name`.
@@ -124,6 +162,13 @@ impl App {
         let tasks = self.docker.running_tasks(&view.id).await?;
         Ok(Some((view, tasks)))
     }
+}
+
+/// The digest in an image reference of the form `<name>@sha256:<hex>`; `None` for a
+/// reference that names no digest.
+pub fn image_digest(image: &str) -> Option<Digest> {
+    let (_, digest) = image.rsplit_once('@')?;
+    Digest::parse(digest).ok()
 }
 
 /// The reference a service's image is deployed under: `<registry>/<repository>@<digest>`.

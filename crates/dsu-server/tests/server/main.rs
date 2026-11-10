@@ -10,6 +10,7 @@
 mod api;
 mod cli;
 mod config;
+mod deploys;
 mod fetch;
 mod harness;
 mod pipeline;

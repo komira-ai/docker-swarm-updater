@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use dsu_core::ids::Digest;
+use dsu_core::record::ErrorToken;
 use dsu_core::url::{UrlError, check_redirect_url, is_public};
 use http::header::{HOST, LOCATION, USER_AGENT};
 use http::{Request, Response, StatusCode};
@@ -166,13 +167,13 @@ pub enum FetchError {
 
 impl FetchError {
     /// The error token of the deploy record: `url_not_allowed`, `too_large` or `fetch_failed`.
-    pub fn token(&self) -> &'static str {
+    pub fn token(&self) -> ErrorToken {
         match self {
             Self::UrlNotAllowed(_)
             | Self::NonPublicAddress { .. }
-            | Self::TooManyRedirects { .. } => "url_not_allowed",
-            Self::TooLarge { .. } => "too_large",
-            _ => "fetch_failed",
+            | Self::TooManyRedirects { .. } => ErrorToken::UrlNotAllowed,
+            Self::TooLarge { .. } => ErrorToken::TooLarge,
+            _ => ErrorToken::FetchFailed,
         }
     }
 }

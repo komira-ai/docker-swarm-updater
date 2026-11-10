@@ -479,6 +479,8 @@ async fn the_local_operator_deploys_any_service_and_is_named_in_the_record() {
         assert_eq!(record["image_digest"], digest(9).as_str());
         assert!(record["id"].as_str().unwrap().starts_with("d-"));
         assert!(record.get("allow_older").is_none());
+        // The deploy waits in its fetching phase, the downloader never being answered.
+        wait_record(&u.app, &deploy_id(&r), |r| r.phase == Phase::Fetching).await;
     }
     assert_eq!(env.state_files("deploys").len(), 3);
 }
@@ -517,16 +519,18 @@ async fn a_caller_is_named_in_the_record_and_the_record_is_a_file() {
         })
     );
     let id = record["id"].as_str().unwrap();
+    wait_record(&u.app, &deploy_id(&r), |r| r.phase == Phase::Fetching).await;
     assert_eq!(env.state_files("deploys"), [format!("{id}.json")]);
     let on_disk: Value = serde_json::from_slice(
         &std::fs::read(env.state_dir().join("deploys").join(format!("{id}.json"))).unwrap(),
     )
     .unwrap();
-    assert_eq!(on_disk, record);
     let status = u
         .as_caller(&app, "GET", &format!("/v1/deploys/{id}"), b"")
         .await;
-    assert_eq!((status.status, status.json()), (200, record));
+    assert_eq!((status.status, status.json()), (200, on_disk.clone()));
+    assert_eq!(on_disk["phase"], "fetching");
+    assert_eq!(on_disk["caller"], record["caller"]);
 }
 
 #[tokio::test]

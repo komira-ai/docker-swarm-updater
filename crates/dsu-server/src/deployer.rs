@@ -87,6 +87,18 @@ impl Deployer {
         }
     }
 
+    /// Whether `swarm_service` is the Swarm service the updater itself runs as.
+    pub fn is_self(&self, swarm_service: &str) -> bool {
+        self.own_service.as_deref() == Some(swarm_service)
+    }
+
+    /// Locks `service` for the record `id` that a previous process left running, which the
+    /// restart rule resumes. Called before the server accepts requests.
+    pub fn adopt(&self, service: &ServiceConfig, id: DeployId) -> Permit {
+        let is_self = self.is_self(&service.swarm_service);
+        self.lock(&service.name, id, Running { is_self })
+    }
+
     /// Section 3.1 steps 3 and 4 for a request that passed every check of step 2: a running
     /// deploy of the same digest answers [`Admission::Existing`]; another digest of the service
     /// running is `busy`; a self-update next to any other deploy is `self_update_busy`; a
@@ -108,7 +120,7 @@ impl Deployer {
         {
             return Ok(Admission::Existing(running));
         }
-        let is_self = self.own_service.as_deref() == Some(candidate.service.swarm_service.as_str());
+        let is_self = self.is_self(&candidate.service.swarm_service);
         self.check_free(service, is_self)?;
         if store
             .service_state(service)

@@ -18,7 +18,7 @@ use crate::net::SystemNetwork;
 use crate::peer::SystemPeerCred;
 use crate::pipeline::{self, PipelineError, VerifyJob};
 use crate::probe::{ProbeOutcome, ProbeTarget, TargetError};
-use crate::runner;
+use crate::runner::{self, RunnerError};
 use crate::server::{ServeError, Shutdown, bind_socket, serve as serve_connections};
 use crate::startup::{StartError, load_config};
 
@@ -130,6 +130,9 @@ pub enum CliError {
     /// `serve` was refused or could not start.
     #[error("{0}")]
     Start(#[from] StartError),
+    /// `serve` could not settle the deploys a previous run left unfinished.
+    #[error("{0}")]
+    Recover(#[from] RunnerError),
     /// `serve` stopped on an error.
     #[error("{0}")]
     Serve(#[from] ServeError),
@@ -229,7 +232,7 @@ pub async fn serve(args: ServeArgs, ready: impl FnOnce()) -> Result<(), CliError
     .await?;
     let listener = bind_socket(&args.socket, args.socket_group)?;
     let shutdown = Shutdown::install()?;
-    runner::recover(&app).await;
+    runner::recover(&app).await?;
     ready();
     serve_connections(app, listener, shutdown.wait()).await?;
     Ok(())

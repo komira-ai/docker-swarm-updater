@@ -20,7 +20,7 @@ use jiff::{SignedDuration, Timestamp};
 use sha2::{Digest as _, Sha256};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 
 /// How long after the last prune the next request prunes again.
 const PRUNE_INTERVAL: SignedDuration = SignedDuration::from_hours(1);
@@ -142,6 +142,7 @@ struct Inner {
 pub struct Store {
     dir: PathBuf,
     inner: Mutex<Inner>,
+    changes: watch::Sender<u64>,
 }
 
 impl Store {
@@ -187,6 +188,7 @@ impl Store {
                 jtis,
                 last_prune: now,
             }),
+            changes: watch::channel(0).0,
         };
         let mut inner = store.inner.lock().await;
         store.prune(&mut inner, now).await;
@@ -197,6 +199,13 @@ impl Store {
     /// The directory.
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// A receiver that is notified after every written record and service state, so a
+    /// caller can wait for a change without polling: it reads the store, and when the
+    /// state it wants is not there yet, waits on `changed()` and reads again.
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.changes.subscribe()
     }
 
     /// Proves the directory can be written to: a file is created, synced and removed.
@@ -218,6 +227,7 @@ impl Store {
         let mut inner = self.inner.lock().await;
         write_atomic(&path, &bytes).await?;
         inner.records.insert(record.id.clone(), record.clone());
+        self.changes.send_modify(|n| *n += 1);
         Ok(())
     }
 
@@ -276,6 +286,7 @@ impl Store {
         let bytes = serde_json::to_vec_pretty(&state).map_err(|e| corrupt(&path, e))?;
         write_atomic(&path, &bytes).await?;
         inner.services.insert(service.clone(), state);
+        self.changes.send_modify(|n| *n += 1);
         Ok(result)
     }
 

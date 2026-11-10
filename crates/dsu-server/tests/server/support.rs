@@ -251,3 +251,39 @@ impl Disk for FakeDisk {
         SystemDisk.write(file, chunk)
     }
 }
+
+/// A disk that writes to the real file and then runs a hook with the number of chunks
+/// written so far (counting from 1), so a test can break something at a chosen moment of a
+/// download.
+pub struct HookDisk<F> {
+    chunks: Mutex<usize>,
+    hook: F,
+}
+
+impl<F: Fn(usize) + Send + Sync> HookDisk<F> {
+    pub fn new(hook: F) -> Self {
+        Self {
+            chunks: Mutex::new(0),
+            hook,
+        }
+    }
+}
+
+impl<F: Fn(usize) + Send + Sync> Disk for HookDisk<F> {
+    fn free_bytes(&self, dir: &Path) -> io::Result<u64> {
+        SystemDisk.free_bytes(dir)
+    }
+
+    fn write<'a>(&'a self, file: &'a mut File, chunk: &'a [u8]) -> BoxFuture<'a, io::Result<()>> {
+        Box::pin(async move {
+            SystemDisk.write(file, chunk).await?;
+            let number = {
+                let mut chunks = self.chunks.lock().unwrap();
+                *chunks += 1;
+                *chunks
+            };
+            (self.hook)(number);
+            Ok(())
+        })
+    }
+}

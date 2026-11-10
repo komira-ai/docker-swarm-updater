@@ -30,6 +30,8 @@ pub enum Mode {
     FailBlobUpload,
     /// Upload locations are absolute URIs instead of paths.
     AbsoluteLocation,
+    /// Deleting a manifest answers 500 and deletes nothing.
+    FailDelete,
 }
 
 /// A change the registry accepted.
@@ -331,6 +333,9 @@ async fn handle(
                 }
             }
         }
+        (&Method::DELETE, Some(Route::Manifest { .. })) if mode == Mode::FailDelete => {
+            reply(StatusCode::INTERNAL_SERVER_ERROR, &[])
+        }
         (
             &Method::DELETE,
             Some(Route::Manifest {
@@ -587,6 +592,33 @@ mod tests {
             }
         }
         format!("/v2/example-org/app/manifests/{}", image.manifest_digest)
+    }
+
+    #[tokio::test]
+    async fn failing_manifest_delete_keeps_the_manifest() {
+        let registry = FakeRegistry::start(Mode::FailDelete).await;
+        let image = OciImage::new("registry").build();
+        let target = push_blobs(&registry, &image).await;
+        let put = request(
+            &registry,
+            Method::PUT,
+            &target,
+            &[("content-type", image.media_type)],
+            &image.manifest,
+        )
+        .await;
+        assert_eq!(put.0, StatusCode::CREATED);
+        assert_eq!(
+            request(&registry, Method::DELETE, &target, &[], b"")
+                .await
+                .0,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert!(
+            registry
+                .manifest("example-org/app", &image.manifest_digest)
+                .is_some()
+        );
     }
 
     #[tokio::test]

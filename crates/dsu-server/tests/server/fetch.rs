@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::support::{ConnectMode, FakeClock, FakeDisk, FakeNetwork};
+use dsu_core::record::ErrorToken;
 use dsu_server::clock::{Clock, SystemClock, with_deadline};
 use dsu_server::fetch::{
     CONNECT_TIMEOUT, Disk, FetchError, Fetched, Fetcher, Limits, MAX_REDIRECTS, READ_TIMEOUT,
@@ -155,7 +156,7 @@ async fn an_unknown_path_is_a_404_and_leaves_no_file() {
         matches!(err, FetchError::Status { status } if status.as_u16() == 404),
         "{err:?}"
     );
-    assert_eq!(err.token(), "fetch_failed");
+    assert_eq!(err.token(), ErrorToken::FetchFailed);
     assert!(w.files().is_empty());
 }
 
@@ -168,7 +169,7 @@ async fn other_statuses_are_fetch_failed() {
             matches!(&err, FetchError::Status { status: s } if s.as_u16() == status),
             "{status}: {err:?}"
         );
-        assert_eq!(err.token(), "fetch_failed");
+        assert_eq!(err.token(), ErrorToken::FetchFailed);
     }
 }
 
@@ -184,7 +185,7 @@ async fn a_short_body_is_fetch_failed_and_the_partial_file_is_removed() {
     .await;
     let err = w.fetch(&NO_LIMITS).await.unwrap_err();
     assert!(matches!(err, FetchError::Http(_)), "{err:?}");
-    assert_eq!(err.token(), "fetch_failed");
+    assert_eq!(err.token(), ErrorToken::FetchFailed);
     assert!(w.files().is_empty());
 }
 
@@ -209,7 +210,7 @@ async fn a_stalled_read_times_out_on_the_clock_and_removes_the_partial_file() {
         matches!(err, FetchError::Timeout { phase: "read", limit } if limit == READ_TIMEOUT),
         "{err:?}"
     );
-    assert_eq!(err.token(), "fetch_failed");
+    assert_eq!(err.token(), ErrorToken::FetchFailed);
     assert!(w.files().is_empty());
 }
 
@@ -231,7 +232,7 @@ async fn a_connect_that_never_completes_times_out_on_the_clock() {
         matches!(err, FetchError::Timeout { phase: "connect", limit } if limit == CONNECT_TIMEOUT),
         "{err:?}"
     );
-    assert_eq!(err.token(), "fetch_failed");
+    assert_eq!(err.token(), ErrorToken::FetchFailed);
 }
 
 #[tokio::test]
@@ -301,7 +302,7 @@ async fn five_redirects_are_followed_and_six_are_refused() {
                 matches!(err, FetchError::TooManyRedirects { max: MAX_REDIRECTS }),
                 "{hops} hops: {err:?}"
             );
-            assert_eq!(err.token(), "url_not_allowed");
+            assert_eq!(err.token(), ErrorToken::UrlNotAllowed);
             assert!(w.files().is_empty());
             assert_eq!(w.server.requests().len(), MAX_REDIRECTS + 1);
         }
@@ -320,7 +321,7 @@ async fn a_redirect_loop_is_refused() {
         matches!(err, FetchError::TooManyRedirects { .. }),
         "{err:?}"
     );
-    assert_eq!(err.token(), "url_not_allowed");
+    assert_eq!(err.token(), ErrorToken::UrlNotAllowed);
     assert_eq!(w.server.requests().len(), MAX_REDIRECTS + 1);
 }
 
@@ -343,7 +344,7 @@ async fn redirects_the_rules_refuse_are_url_not_allowed_and_never_connected_to()
             matches!(err, FetchError::UrlNotAllowed(_)),
             "{location}: {err:?}"
         );
-        assert_eq!(err.token(), "url_not_allowed");
+        assert_eq!(err.token(), ErrorToken::UrlNotAllowed);
         assert_eq!(w.network.connects().len(), 1, "{location}");
         assert!(w.files().is_empty());
     }
@@ -354,7 +355,7 @@ async fn a_redirect_without_a_location_is_fetch_failed() {
     let w = world(vec![(PATH, Route::Status(302))]).await;
     let err = w.fetch(&NO_LIMITS).await.unwrap_err();
     assert!(matches!(err, FetchError::NoLocation { .. }), "{err:?}");
-    assert_eq!(err.token(), "fetch_failed");
+    assert_eq!(err.token(), ErrorToken::FetchFailed);
 }
 
 #[tokio::test]
@@ -389,7 +390,7 @@ async fn a_host_that_resolves_to_a_private_address_is_refused_before_connecting(
             matches!(err, FetchError::NonPublicAddress { .. }),
             "{answer:?}: {err:?}"
         );
-        assert_eq!(err.token(), "url_not_allowed");
+        assert_eq!(err.token(), ErrorToken::UrlNotAllowed);
         assert_eq!(
             w.network.connects().len(),
             1,
@@ -430,7 +431,7 @@ async fn a_host_that_is_not_a_valid_server_name_is_fetch_failed() {
         .await
         .unwrap_err();
     assert!(matches!(err, FetchError::Tls { .. }), "{err:?}");
-    assert_eq!(err.token(), "fetch_failed");
+    assert_eq!(err.token(), ErrorToken::FetchFailed);
     assert!(w.network.resolved().is_empty());
 }
 
@@ -440,7 +441,7 @@ async fn resolution_and_connection_failures_are_fetch_failed() {
     let w = world_with(vec![], Arc::new(SystemDisk), |n| n, redirect_hosts()).await;
     let err = w.fetch(&NO_LIMITS).await.unwrap_err();
     assert!(matches!(err, FetchError::Resolve { .. }), "{err:?}");
-    assert_eq!(err.token(), "fetch_failed");
+    assert_eq!(err.token(), ErrorToken::FetchFailed);
     // no addresses
     let w = world_with(
         vec![],
@@ -501,7 +502,7 @@ async fn a_certificate_from_another_authority_or_for_another_name_fails_the_hand
         .await
         .unwrap_err();
     assert!(matches!(err, FetchError::Tls { .. }), "{err:?}");
-    assert_eq!(err.token(), "fetch_failed");
+    assert_eq!(err.token(), ErrorToken::FetchFailed);
 
     let w = world_with(
         vec![],
@@ -535,7 +536,7 @@ async fn the_size_limit_is_checked_against_content_length_and_the_running_count(
             matches!(err, FetchError::TooLarge { limit: 99 }),
             "{what}: {err:?}"
         );
-        assert_eq!(err.token(), "too_large");
+        assert_eq!(err.token(), ErrorToken::TooLarge);
         assert!(w.files().is_empty(), "{what}");
 
         let exact = Limits {
@@ -588,7 +589,7 @@ async fn the_disk_must_keep_its_minimum_free_space() {
                 matches!(err, FetchError::DiskFull { free: f, needed: 2100 } if f == free),
                 "{err:?}"
             );
-            assert_eq!(err.token(), "fetch_failed");
+            assert_eq!(err.token(), ErrorToken::FetchFailed);
             assert_eq!(disk.chunks(), 0, "nothing was written");
             assert!(w.files().is_empty());
         }
@@ -614,7 +615,7 @@ async fn the_free_space_is_checked_again_while_streaming() {
         .await
         .unwrap_err();
     assert!(matches!(err, FetchError::DiskFull { .. }), "{err:?}");
-    assert_eq!(err.token(), "fetch_failed");
+    assert_eq!(err.token(), ErrorToken::FetchFailed);
     assert!(disk.chunks() >= 1);
     assert!(w.files().is_empty());
 }
@@ -634,7 +635,7 @@ async fn a_write_failing_midway_is_fetch_failed_and_the_partial_file_is_removed(
         matches!(&err, FetchError::Write { path, .. } if path.ends_with("image.tar")),
         "{err:?}"
     );
-    assert_eq!(err.token(), "fetch_failed");
+    assert_eq!(err.token(), ErrorToken::FetchFailed);
     assert_eq!(
         disk.chunks(),
         2,
@@ -653,7 +654,7 @@ async fn the_free_space_of_a_missing_directory_cannot_be_read() {
         .await
         .unwrap_err();
     assert!(matches!(err, FetchError::FreeSpace { .. }), "{err:?}");
-    assert_eq!(err.token(), "fetch_failed");
+    assert_eq!(err.token(), ErrorToken::FetchFailed);
 }
 
 #[tokio::test]
@@ -674,7 +675,7 @@ async fn a_file_that_cannot_be_created_is_fetch_failed_and_an_existing_file_is_k
         .await
         .unwrap_err();
     assert!(matches!(err, FetchError::Create { .. }), "{err:?}");
-    assert_eq!(err.token(), "fetch_failed");
+    assert_eq!(err.token(), ErrorToken::FetchFailed);
     // the file exists: it is neither overwritten nor removed
     std::fs::write(w.dir.path().join("image.tar"), b"earlier").unwrap();
     let err = w.fetch(&NO_LIMITS).await.unwrap_err();
@@ -692,67 +693,76 @@ fn error_tokens_and_one_line_details() {
         url: "u".into(),
         rule: "r",
     };
-    let cases: Vec<(FetchError, &str)> = vec![
-        (FetchError::UrlNotAllowed(url_error), "url_not_allowed"),
+    let cases: Vec<(FetchError, ErrorToken)> = vec![
+        (
+            FetchError::UrlNotAllowed(url_error),
+            ErrorToken::UrlNotAllowed,
+        ),
         (
             FetchError::NonPublicAddress {
                 host: "h".into(),
                 addr: "127.0.0.1".parse().unwrap(),
             },
-            "url_not_allowed",
+            ErrorToken::UrlNotAllowed,
         ),
-        (FetchError::TooManyRedirects { max: 5 }, "url_not_allowed"),
-        (FetchError::TooLarge { limit: 1 }, "too_large"),
-        (FetchError::CaFile("x".into()), "fetch_failed"),
+        (
+            FetchError::TooManyRedirects { max: 5 },
+            ErrorToken::UrlNotAllowed,
+        ),
+        (FetchError::TooLarge { limit: 1 }, ErrorToken::TooLarge),
+        (FetchError::CaFile("x".into()), ErrorToken::FetchFailed),
         (
             FetchError::Resolve {
                 host: "h".into(),
                 source: io(),
             },
-            "fetch_failed",
+            ErrorToken::FetchFailed,
         ),
         (
             FetchError::Connect {
                 host: "h".into(),
                 source: io(),
             },
-            "fetch_failed",
+            ErrorToken::FetchFailed,
         ),
         (
             FetchError::Tls {
                 host: "h".into(),
                 source: io(),
             },
-            "fetch_failed",
+            ErrorToken::FetchFailed,
         ),
         (
             FetchError::Timeout {
                 phase: "read",
                 limit: READ_TIMEOUT,
             },
-            "fetch_failed",
+            ErrorToken::FetchFailed,
         ),
-        (FetchError::DiskFull { free: 1, needed: 2 }, "fetch_failed"),
+        (
+            FetchError::DiskFull { free: 1, needed: 2 },
+            ErrorToken::FetchFailed,
+        ),
         (
             FetchError::FreeSpace {
                 dir: "d".into(),
                 source: io(),
             },
-            "fetch_failed",
+            ErrorToken::FetchFailed,
         ),
         (
             FetchError::Create {
                 path: "p".into(),
                 source: io(),
             },
-            "fetch_failed",
+            ErrorToken::FetchFailed,
         ),
         (
             FetchError::Write {
                 path: "p".into(),
                 source: io(),
             },
-            "fetch_failed",
+            ErrorToken::FetchFailed,
         ),
     ];
     for (error, token) in cases {
@@ -779,7 +789,7 @@ async fn ca_files_replace_the_roots_and_must_hold_a_usable_certificate() {
     ] {
         let err = roots_from_pem(text.as_bytes()).unwrap_err();
         assert!(matches!(err, FetchError::CaFile(_)), "{what}: {err:?}");
-        assert_eq!(err.token(), "fetch_failed");
+        assert_eq!(err.token(), ErrorToken::FetchFailed);
     }
     assert!(!default_roots().is_empty());
     Fetcher::new(

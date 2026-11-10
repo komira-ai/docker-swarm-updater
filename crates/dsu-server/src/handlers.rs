@@ -19,7 +19,7 @@ use http_body_util::{BodyExt, LengthLimitError, Limited};
 use hyper::body::Incoming;
 use serde::Serialize;
 
-use crate::app::{App, image_reference};
+use crate::app::{App, image_digest, image_reference};
 use crate::auth::Authenticated;
 use crate::deployer::{Admission, Candidate};
 use crate::runner::{self, Job};
@@ -187,8 +187,7 @@ pub async fn status(app: &App, auth: &Authenticated, id: &DeployId) -> Result<Re
 fn running_digests(tasks: &[TaskView]) -> Vec<Digest> {
     let digests: BTreeSet<Digest> = tasks
         .iter()
-        .filter_map(|t| t.image.rsplit_once('@'))
-        .filter_map(|(_, digest)| Digest::parse(digest).ok())
+        .filter_map(|t| image_digest(&t.image))
         .collect();
     digests.into_iter().collect()
 }

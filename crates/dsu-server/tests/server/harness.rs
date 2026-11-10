@@ -7,21 +7,25 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 use base64::Engine as _;
-use dsu_core::ids::Digest;
+use dsu_core::ids::{DeployId, Digest};
+use dsu_core::record::{Record, State};
 use dsu_server::app::{App, Params};
-use dsu_server::fetch::{SystemDisk, default_roots};
+use dsu_server::fetch::{Disk, SystemDisk, default_roots};
+use dsu_server::net::Network;
 use dsu_server::peer::PeerCred;
+use dsu_server::runner::recover;
 use dsu_server::server::{ServeError, bind_socket, serve};
 use dsu_server::startup::load_config;
 use dsu_testkit::docker::{FakeDocker, FakeService, FakeTask};
 use dsu_testkit::mint::Authority;
+use rustls::RootCertStore;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
-use crate::support::{FakeClock, FakeNetwork};
+use crate::support::{ConnectMode, FakeClock, FakeNetwork};
 
 /// The uid of the fronting proxy.
 pub const PROXY: u32 = 1234;
@@ -32,9 +36,10 @@ pub const REGISTRY: &str = "127.0.0.1:5000";
 /// The workflow of the callers.
 pub const DEPLOY_WORKFLOW: &str = "example-org/docker-swarm-updater/.github/workflows/deploy.yml@0123456789012345678901234567890123456789";
 
-/// The config of the harness: three services, `ghost` having no Swarm service.
+/// The config of the harness: three services, `ghost` having no Swarm service. `web` caps the
+/// image tar at 1 MiB and gives Swarm 60 s to converge; `app` waits however long it takes.
 pub fn config_text(trusted_root: &Path, registry: &str) -> String {
-    let service = |name: &str, id: &str| {
+    let service = |name: &str, id: &str, extra: &str| {
         format!(
             r#"
 [[service]]
@@ -42,6 +47,7 @@ name = "{name}"
 swarm_service = "{name}_server"
 repository = "{name}"
 platform = "linux/amd64"
+{extra}
 artifact_url = {{ owner = "example-org", repo = "{name}" }}
 artifact_name = "{name}-*-linux-x86_64.image.tar"
 signer = {{ repository = "example-org/{name}", repository_id = "{id}", workflow = ".github/workflows/artifacts.yml", ref = "refs/heads/main", triggers = ["push"] }}
@@ -63,9 +69,13 @@ keep_previous = 3
 min_free_bytes = 0
 {}{}{}"#,
         trusted_root.display(),
-        service("app", "1"),
-        service("web", "2"),
-        service("ghost", "3"),
+        service("app", "1", ""),
+        service(
+            "web",
+            "2",
+            "max_image_bytes = 1048576\nconverge_timeout_secs = 60"
+        ),
+        service("ghost", "3", ""),
     )
 }
 
@@ -97,6 +107,7 @@ impl PeerCred for FakePeer {
 
 /// The parts that outlive one updater process: the directory, the daemon, the clock.
 pub struct Env {
+    pub registry: String,
     pub dir: tempfile::TempDir,
     pub docker: Option<FakeDocker>,
     pub clock: FakeClock,
@@ -107,22 +118,33 @@ pub struct Env {
 impl Env {
     /// The daemon runs `app_server` (digest 1, one task) and `web_server` (digest 2).
     pub async fn new() -> Env {
+        Env::with_registry(REGISTRY).await
+    }
+
+    /// As [`Env::new`], with the config and the images naming the registry at `registry`.
+    pub async fn with_registry(registry: &str) -> Env {
         let dir = tempfile::tempdir().unwrap();
         let clock = FakeClock::new();
         let authority = Authority::public_good();
         let root = dir.path().join("trusted_root.json");
         write_trusted_root(&root, &authority.trusted_root_json());
         let config_path = dir.path().join("config.toml");
-        std::fs::write(&config_path, config_text(&root, REGISTRY)).unwrap();
-        let docker = FakeDocker::start(dir.path(), dsu_server::clock::Clock::now(&clock)).await;
-        docker.add_service(FakeService::new("id-app", "app_server", &app_image(1)));
-        docker.set_tasks("app_server", vec![FakeTask::running("t1", &app_image(1))]);
+        std::fs::write(&config_path, config_text(&root, registry)).unwrap();
+        // Updates start a day after the fake clock's first reading, so Swarm's `StartedAt` is
+        // later than any time a deploy reads the service at.
+        let docker_now =
+            dsu_server::clock::Clock::now(&clock) + jiff::SignedDuration::from_hours(24);
+        let docker = FakeDocker::start(dir.path(), docker_now).await;
+        let app_image = format!("{registry}/app@{}", digest(1));
+        docker.add_service(FakeService::new("id-app", "app_server", &app_image));
+        docker.set_tasks("app_server", vec![FakeTask::running("t1", &app_image)]);
         docker.add_service(FakeService::new(
             "id-web",
             "web_server",
-            &format!("{REGISTRY}/web@{}", digest(2)),
+            &format!("{registry}/web@{}", digest(2)),
         ));
         Env {
+            registry: registry.to_owned(),
             dir,
             docker: Some(docker),
             clock,
@@ -159,13 +181,21 @@ impl Env {
 pub struct Options {
     pub allow_local_operator: bool,
     pub hostname: String,
+    pub network: Arc<dyn Network>,
+    pub disk: Arc<dyn Disk>,
+    pub tls_roots: RootCertStore,
 }
 
 impl Default for Options {
+    /// Downloads reach a host that resolves and never answers, so a deploy waits in its
+    /// fetching phase until the test moves the clock.
     fn default() -> Self {
         Options {
             allow_local_operator: true,
             hostname: "dsu-test-host".to_owned(),
+            network: Arc::new(FakeNetwork::new(0).allowed().mode(ConnectMode::Hang)),
+            disk: Arc::new(SystemDisk),
+            tls_roots: default_roots(),
         }
     }
 }
@@ -177,7 +207,6 @@ pub struct Updater {
     socket: PathBuf,
     stop: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<Result<(), ServeError>>>,
-    counter: AtomicUsize,
 }
 
 pub struct Reply {
@@ -273,12 +302,13 @@ impl Updater {
             hostname: options.hostname,
             clock: Arc::new(env.clock.clone()),
             peer_cred: peer.clone(),
-            network: Arc::new(FakeNetwork::new(0)),
-            disk: Arc::new(SystemDisk),
-            tls_roots: default_roots(),
+            network: options.network,
+            disk: options.disk,
+            tls_roots: options.tls_roots,
         })
         .await
         .unwrap();
+        recover(&app).await.unwrap();
         let listener = bind_socket(&env.socket(), current_gid()).unwrap();
         let (stop, stopped) = oneshot::channel();
         let task = tokio::spawn(serve(Arc::clone(&app), listener, async {
@@ -290,14 +320,16 @@ impl Updater {
             socket: env.socket(),
             stop: Some(stop),
             task: Some(task),
-            counter: AtomicUsize::new(0),
         }
     }
 
-    /// Stops the server and waits for it to return.
+    /// Ends this process: the server stops, the running deploys are dropped where they are
+    /// (what they wrote stays), and the server's result is returned.
     pub async fn stop(mut self) -> Result<(), ServeError> {
         let _ = self.stop.take().unwrap().send(());
-        self.task.take().unwrap().await.unwrap()
+        let result = self.task.take().unwrap().await.unwrap();
+        self.app.abort_deploys().await;
+        result
     }
 
     pub fn set_peer(&self, uid: u32) {
@@ -314,7 +346,9 @@ impl Updater {
 
     /// A claims header value for `caller` with a fresh `jti`, valid for 300 s of fake time.
     pub fn token(&self, caller: &Value) -> String {
-        let n = self.counter.fetch_add(1, Ordering::SeqCst);
+        // Unique across the updaters of one test: a restarted updater remembers spent ids.
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, Ordering::SeqCst);
         self.token_with(caller, &format!("jti-{n}"), 300)
     }
 
@@ -405,4 +439,26 @@ pub fn deploy_body(name: &str, n: u8, edit: impl FnOnce(&mut Value)) -> Vec<u8> 
 
 pub fn deploys(name: &str) -> String {
     format!("/v1/services/{name}/deploys")
+}
+
+/// The record `id` once `wanted` holds for it; woken by the store's own notifications, so
+/// nothing is slept on.
+pub async fn wait_record(app: &App, id: &DeployId, wanted: impl Fn(&Record) -> bool) -> Record {
+    let mut changes = app.store.subscribe();
+    loop {
+        if let Some(record) = app.store.record(id).await.filter(&wanted) {
+            return record;
+        }
+        changes.changed().await.unwrap();
+    }
+}
+
+/// The record `id` once it ended.
+pub async fn finished(app: &App, id: &DeployId) -> Record {
+    wait_record(app, id, |r| r.state != State::Running).await
+}
+
+/// The id a Deploy answer names.
+pub fn deploy_id(reply: &Reply) -> DeployId {
+    DeployId::parse(reply.json()["id"].as_str().unwrap()).unwrap()
 }
