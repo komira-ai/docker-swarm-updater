@@ -18,8 +18,9 @@ env:
   CARGO_INCREMENTAL: 0
 
 jobs:
-  # fmt, clippy with warnings as errors, and cargo-deny's bans, licences and sources.
-  # Advisories run in advisories.yml and never block a pull request.
+  # fmt, clippy with warnings as errors, cargo-deny's bans, licences and sources, and
+  # actionlint on these workflows. Advisories run in advisories.yml and never block a
+  # pull request.
   lint:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -43,10 +44,11 @@ jobs:
       # install-action checks each tool's release archive against its recorded SHA-256.
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
-          tool: cargo-deny@0.20.2
+          tool: cargo-deny@0.20.2,actionlint@1.7.7
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo deny --locked check bans licenses sources
+      - run: actionlint
 
   # The tests under nextest with line and branch coverage, then every crate held to the
   # floors in its own Cargo.toml (at least 99% of lines and of branches). Branch coverage
