@@ -180,20 +180,16 @@ fn artifact_name_patterns_have_one_star() {
     spec.subjects[0].name = "abc".to_owned();
     let bundle = authority.bundle(&spec).to_string().into_bytes();
     let matches = |pattern: &str| run(&roots, &bundle, &tar(), &signer(), pattern).is_ok();
+    // The config's matcher: one `*` standing for one or more characters other than `/`.
     assert!(matches("*"));
     assert!(matches("a*"));
     assert!(matches("*c"));
-    assert!(matches("ab*c"));
-    assert!(matches("abc*"));
-    assert!(matches("*abc"));
-    assert!(matches("abc"));
-    // the prefix and the suffix may not overlap
-    assert!(!matches("ab*bc"));
-    assert!(!matches("abcd*"));
-    assert!(!matches("*xabc"));
+    assert!(matches("a*c"));
+    assert!(!matches("ab*c"));
+    assert!(!matches("abc*"));
+    assert!(!matches("*abc"));
+    assert!(!matches("abc"));
     assert!(!matches("b*"));
-    assert!(!matches("*b"));
-    assert!(!matches("abd"));
 }
 
 #[test]

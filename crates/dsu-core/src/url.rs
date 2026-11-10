@@ -146,7 +146,7 @@ fn judge(raw: &str, spec: &ReleaseSpec<'_>) -> Result<ReleaseUrl, UrlError> {
 /// `spec.artifact_name`.
 pub fn check_image_url(raw: &str, spec: &ReleaseSpec<'_>) -> Result<ReleaseUrl, UrlError> {
     let release = judge(raw, spec)?;
-    if !name_matches(spec.artifact_name, &release.file) {
+    if !crate::config::artifact_name_matches(spec.artifact_name, &release.file) {
         return Err(refused(&release.url, "file name must match artifact_name"));
     }
     Ok(release)
@@ -220,20 +220,6 @@ pub fn is_public(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => is_public_v4(v4),
         IpAddr::V6(v6) => is_public_v6(v6),
-    }
-}
-
-/// Whether `name` matches `pattern`, which holds one `*` standing for any run of characters
-/// (including none). A pattern without a `*` must equal the name; the first `*` is the
-/// wildcard.
-pub fn name_matches(pattern: &str, name: &str) -> bool {
-    match pattern.split_once('*') {
-        Some((prefix, suffix)) => {
-            name.len() >= prefix.len() + suffix.len()
-                && name.starts_with(prefix)
-                && name.ends_with(suffix)
-        }
-        None => pattern == name,
     }
 }
 
@@ -553,29 +539,5 @@ mod tests {
         ] {
             assert!(!is_public(ip(s)), "{s}");
         }
-    }
-
-    #[test]
-    fn name_pattern_matching() {
-        let p = "app-*-linux-x86_64.image.tar";
-        assert!(name_matches(p, "app-1.2.3-linux-x86_64.image.tar"));
-        assert!(name_matches(p, "app--linux-x86_64.image.tar"));
-        assert!(!name_matches(p, "app-linux-x86_64.image.tar"));
-        assert!(!name_matches(
-            p,
-            "app-1-linux-x86_64.image.tar.sigstore.json"
-        ));
-        assert!(!name_matches(p, "xapp-1-linux-x86_64.image.tar"));
-        assert!(!name_matches(p, ""));
-        assert!(name_matches("*", "anything"));
-        assert!(name_matches("*", ""));
-        assert!(name_matches("a*", "a"));
-        assert!(!name_matches("a*", "b"));
-        assert!(name_matches("*z", "z"));
-        assert!(name_matches("exact", "exact"));
-        assert!(!name_matches("exact", "exact2"));
-        // a name too short for both ends does not match, even when the ends overlap in it
-        assert!(!name_matches("ab*ba", "aba"));
-        assert!(name_matches("ab*ba", "abba"));
     }
 }

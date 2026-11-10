@@ -334,7 +334,7 @@ fn check_subject(bundle: &Bundle, pattern: &str, tar: &Digest) -> Result<String,
         .subject
         .into_iter()
         .find(|s| {
-            name_matches(pattern, &s.name)
+            dsu_core::config::artifact_name_matches(pattern, &s.name)
                 && s.digest
                     .get("sha256")
                     .is_some_and(|d| d.as_str() == tar.hex())
@@ -346,19 +346,6 @@ fn check_subject(bundle: &Bundle, pattern: &str, tar: &Digest) -> Result<String,
                 tar.hex()
             ))
         })
-}
-
-/// Whether `name` matches `pattern`, a string with one `*` standing for any run of characters
-/// (the config guarantees exactly one; without one the pattern must equal `name`).
-fn name_matches(pattern: &str, name: &str) -> bool {
-    match pattern.split_once('*') {
-        Some((prefix, suffix)) => {
-            name.len() >= prefix.len() + suffix.len()
-                && name.starts_with(prefix)
-                && name.ends_with(suffix)
-        }
-        None => name == pattern,
-    }
 }
 
 /// Section 3.3 step 1 against one root: the verified time of the signature.
