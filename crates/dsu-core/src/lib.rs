@@ -4,5 +4,14 @@
 //! retention. No I/O, no clock, `BTreeMap` only: every input, time included, is an argument.
 #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
 
-pub mod ids;
+pub mod api;
+pub mod claims;
 pub mod config;
+pub mod ids;
+pub mod oci;
+pub mod peer;
+pub mod record;
+pub mod retention;
+pub mod route;
+pub mod state;
+pub mod swarm;
