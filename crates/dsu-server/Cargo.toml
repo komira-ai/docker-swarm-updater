@@ -1,0 +1,50 @@
+[package]
+name = "dsu-server"
+description = "docker-swarm-updater's HTTP API, state files, deploy runner, fetcher and verbs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Coverage floors of this crate, read by `cargo xtask coverage` (never below 99).
+[package.metadata.coverage]
+lines = 99.0
+branches = 99.0
+
+[dependencies]
+dsu-core.workspace = true
+dsu-verify.workspace = true
+dsu-docker.workspace = true
+dsu-registry.workspace = true
+sigstore-verify.workspace = true
+tokio.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+http.workspace = true
+bytes.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+tokio-rustls.workspace = true
+webpki-roots.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+jiff.workspace = true
+sha2.workspace = true
+hex.workspace = true
+base64.workspace = true
+tar.workspace = true
+rustix.workspace = true
+getrandom.workspace = true
+clap.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+dsu-testkit.workspace = true
+tempfile.workspace = true

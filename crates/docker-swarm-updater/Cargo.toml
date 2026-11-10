@@ -1,0 +1,23 @@
+[package]
+name = "docker-swarm-updater"
+description = "Deploy a pinned, signature-checked image to a Docker Swarm service when a CI job asks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Coverage floors of this crate, read by `cargo xtask coverage` (never below 99).
+[package.metadata.coverage]
+lines = 99.0
+branches = 99.0
+
+[dependencies]
+dsu-server.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

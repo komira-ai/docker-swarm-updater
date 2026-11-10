@@ -1,0 +1,19 @@
+# Tests may unwrap: a failed unwrap is a failed test. Production code returns typed errors.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+# Items the pure crate (dsu-core) must not use: it takes time and I/O as inputs. Its lib.rs
+# denies clippy::disallowed_methods and clippy::disallowed_types; other crates allow them.
+disallowed-methods = [
+    { path = "std::time::Instant::now", reason = "the pure core takes time as an input" },
+    { path = "std::time::SystemTime::now", reason = "the pure core takes time as an input" },
+    { path = "jiff::Timestamp::now", reason = "the pure core takes time as an input" },
+    { path = "std::thread::sleep", reason = "the pure core never blocks or waits" },
+]
+disallowed-types = [
+    { path = "std::collections::HashMap", reason = "iteration order varies per process; use BTreeMap" },
+    { path = "std::collections::HashSet", reason = "iteration order varies per process; use BTreeSet" },
+    { path = "std::net::TcpStream", reason = "the pure core does no network I/O" },
+    { path = "std::net::TcpListener", reason = "the pure core does no network I/O" },
+    { path = "std::net::UdpSocket", reason = "the pure core does no network I/O" },
+    { path = "std::fs::File", reason = "the pure core does no file I/O" },
+]

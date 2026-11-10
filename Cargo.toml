@@ -1,0 +1,71 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "Apache-2.0"
+repository = "https://github.com/komira-ai/docker-swarm-updater"
+publish = false
+
+# Every external dependency is declared here once and used from a member as
+# `name.workspace = true`. crates.io only, permissive licences only (deny.toml).
+[workspace.dependencies]
+dsu-core = { path = "crates/dsu-core" }
+dsu-docker = { path = "crates/dsu-docker" }
+dsu-registry = { path = "crates/dsu-registry" }
+dsu-server = { path = "crates/dsu-server" }
+dsu-testkit = { path = "crates/dsu-testkit" }
+dsu-verify = { path = "crates/dsu-verify" }
+
+base64 = "0.23.1"
+bytes = "1.12.1"
+clap = { version = "4.6.7", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
+getrandom = "0.4.3"
+hex = "0.4.3"
+http = "1.5.0"
+http-body-util = "0.1.5"
+hyper = { version = "1.12.0", features = ["http1", "client", "server"] }
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+jiff = { version = "0.2.42", features = ["serde"] }
+# rustls uses aws-lc-rs, the provider sigstore-verify already links, so the binary carries
+# one cryptographic library.
+rustls = { version = "0.23.35", default-features = false, features = ["aws_lc_rs", "std", "tls12", "logging"] }
+rustls-pki-types = { version = "1.16.0", features = ["std"] }
+rustix = { version = "1.1.6", default-features = false, features = ["std", "net", "fs", "process", "system"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.10.9"
+# The offline Sigstore verifier (docs/design.md section 5.1): bundles v0.1 to v0.3,
+# DSSE in-toto included, against a trusted-root file, with no network access.
+sigstore-verify = { version = "0.16.0", default-features = false, features = ["aws-lc-rs"] }
+tar = { version = "0.4.46", default-features = false }
+thiserror = "2.0.17"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "net", "fs", "io-util", "time", "sync"] }
+tokio-rustls = { version = "0.26.6", default-features = false, features = ["aws_lc_rs", "tls12", "logging"] }
+toml = { version = "0.9.8", default-features = false, features = ["parse", "serde", "std"] }
+url = "2.5.8"
+webpki-roots = "1.0.4"
+
+# Test only (dsu-testkit and dev-dependencies): the test CA, the test log and timestamp
+# authority, and scratch directories.
+aws-lc-rs = "1.15.1"
+cms = { version = "0.2.3", features = ["builder"] }
+const-oid = { version = "0.9.6", features = ["db"] }
+der = { version = "0.7.10", features = ["alloc", "derive", "oid", "std"] }
+rcgen = { version = "0.14.5", default-features = false, features = ["aws_lc_rs", "pem", "crypto"] }
+tempfile = "3.23.0"
+x509-cert = { version = "0.2.5", features = ["builder"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
+[profile.coverage]
+inherits = "dev"
