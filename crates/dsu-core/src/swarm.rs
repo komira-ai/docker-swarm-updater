@@ -416,20 +416,25 @@ mod tests {
 
     #[test]
     fn restart_after_an_update_that_started_no_rollout_is_converged() {
+        // No `UpdateStatus` at all, the record's image named by the spec and run by every
+        // task: settled at start in each phase after the hand-off.
         let p = pending();
-        for label in [OURS, Some("d-other")] {
-            let v = view(11, None, NEW, label);
+        for phase in [Phase::HandedOff, Phase::Updating, Phase::Waiting] {
+            for label in [OURS, Some("d-other")] {
+                let v = view(11, None, NEW, label);
+                assert_eq!(
+                    restart(phase, Some(&p), &v, &[NEW, NEW]),
+                    RestartAction::Converged,
+                    "{phase:?} {label:?}"
+                );
+            }
+            let v = view(11, None, NEW, OURS);
             assert_eq!(
-                restart(Phase::Waiting, Some(&p), &v, &[NEW]),
-                RestartAction::Converged,
-                "{label:?}"
+                restart(phase, Some(&p), &v, &[NEW, OLD]),
+                RestartAction::ResumeWait,
+                "{phase:?}"
             );
         }
-        let v = view(11, None, NEW, OURS);
-        assert_eq!(
-            restart(Phase::Waiting, Some(&p), &v, &[OLD]),
-            RestartAction::ResumeWait
-        );
     }
 
     #[test]
