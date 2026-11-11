@@ -101,11 +101,7 @@ async fn socket_failures_name_the_flag() {
     assert!(error.to_string().contains("bind"), "{error}");
 }
 
-/// The real read, from both ends of a connection in this process. The kernel's other answer, pid 0
-/// for a peer outside the updater's pid namespace, needs a second pid namespace, which takes
-/// privileges a hermetic test does not have; the API tests in `api::peer` feed the server those
-/// credentials (and an unreadable read, which is what the earlier rustix-based read gave for
-/// pid 0) through the fake peer.
+/// The real read, from both ends of a connection in this process.
 #[tokio::test]
 async fn the_peer_credentials_are_the_kernels() {
     let dir = tempfile::tempdir().unwrap();
@@ -121,6 +117,28 @@ async fn the_peer_credentials_are_the_kernels() {
     };
     assert_eq!(SystemPeerCred.credentials(&server).unwrap(), mine);
     assert_eq!(SystemPeerCred.credentials(&client).unwrap(), mine);
+}
+
+/// The kernel's pid 0, through the real read. A client outside the updater's pid namespace (root
+/// on the host of the updater's container) is reported with pid 0; so is the peer of a Unix
+/// socket that never connected, with uid and gid -1, which this test can make without privileges
+/// or a second namespace. The earlier rustix-based read could not represent pid 0 and failed here,
+/// which dropped the host's client.
+#[tokio::test]
+async fn a_pid_0_answer_from_the_kernel_is_read() {
+    use rustix::net::{AddressFamily, SocketType, socket};
+    let fd = socket(AddressFamily::UNIX, SocketType::STREAM, None).unwrap();
+    let unconnected = std::os::unix::net::UnixStream::from(fd);
+    unconnected.set_nonblocking(true).unwrap();
+    let unconnected = tokio::net::UnixStream::from_std(unconnected).unwrap();
+    assert_eq!(
+        SystemPeerCred.credentials(&unconnected).unwrap(),
+        Credentials {
+            pid: 0,
+            uid: u32::MAX,
+            gid: u32::MAX,
+        }
+    );
 }
 
 #[tokio::test]
