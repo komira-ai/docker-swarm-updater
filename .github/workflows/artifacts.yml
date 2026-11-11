@@ -64,9 +64,11 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - run: rustup toolchain install
+      - name: Count the commits on main up to the pushed one
+        run: git rev-list --count "$COMMIT" > "$RUNNER_TEMP/commit-count"
       - name: The release version
         id: version
-        run: cargo xtask release version --commit-count "$(git rev-list --count "$COMMIT")" --github-output "$GITHUB_OUTPUT"
+        run: cargo xtask release version --commit-count-file "$RUNNER_TEMP/commit-count" --github-output "$GITHUB_OUTPUT"
 
   build:
     name: build ${{ matrix.platform }}
@@ -144,7 +146,7 @@ jobs:
       - name: The binary is static
         run: cargo xtask release check-static --binary "target/$TARGET/release/docker-swarm-updater"
       - name: The binary prints the release version
-        run: '"target/$TARGET/release/docker-swarm-updater" --version | grep --fixed-strings --line-regexp "docker-swarm-updater $VERSION"'
+        run: cargo xtask release check-output --expect "docker-swarm-updater $VERSION" -- "target/$TARGET/release/docker-swarm-updater" --version
       - name: Keep the first build of the binary
         run: install -D --mode 0755 "target/$TARGET/release/docker-swarm-updater" "dist/docker-swarm-updater-$VERSION-$PLATFORM"
       - name: Remove the build of the workspace's own crates
@@ -169,7 +171,7 @@ jobs:
       - name: Load the image
         run: docker load --input "$RUNNER_TEMP/image-1.tar"
       - name: The image's entrypoint prints the release version
-        run: docker run --rm --network none "docker-swarm-updater:$VERSION" --version | grep --fixed-strings --line-regexp "docker-swarm-updater $VERSION"
+        run: cargo xtask release check-output --expect "docker-swarm-updater $VERSION" -- docker run --rm --network none "docker-swarm-updater:$VERSION" --version
       - name: Name the image
         run: cp "$RUNNER_TEMP/image-1.tar" "dist/docker-swarm-updater-$VERSION-$PLATFORM.image.tar"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

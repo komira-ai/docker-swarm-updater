@@ -36,8 +36,26 @@ fn version_is_the_workspace_major_and_minor_and_the_commit_count() {
     );
     assert_eq!(
         run(&s(&["version"])).unwrap_err(),
-        "--commit-count is required"
+        "give one of --commit-count and --commit-count-file"
     );
+    let file = dir.path().join("count");
+    std::fs::write(&file, "42\n").unwrap();
+    let mut both = root_args(&["version", "--commit-count", "42"], dir.path());
+    both.extend(s(&["--commit-count-file", &file.to_string_lossy()]));
+    assert_eq!(
+        run(&both).unwrap_err(),
+        "give one of --commit-count and --commit-count-file"
+    );
+    // The count read from a file, as `git rev-list --count` writes it.
+    let mut from_file = root_args(&["version"], dir.path());
+    from_file.extend(s(&["--commit-count-file", &file.to_string_lossy()]));
+    assert_eq!(run(&from_file).unwrap().text, "version=0.1.42\n");
+    let mut missing = root_args(&["version"], dir.path());
+    missing.extend(s(&[
+        "--commit-count-file",
+        &dir.path().join("none").to_string_lossy(),
+    ]));
+    assert!(run(&missing).unwrap_err().starts_with("reading "));
     let bad = workspace(
         &MANIFEST.replace("\"0.1.0\"\n\n[workspace.dep", "\"0.1\"\n\n[workspace.dep"),
         LOCK,

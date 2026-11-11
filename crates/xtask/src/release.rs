@@ -1,16 +1,19 @@
 //! `cargo xtask release <verb>`: the steps of `.github/workflows/artifacts.yml` that are more
 //! than one command, so the workflow runs one named command per step and the logic has tests.
 //!
-//! - `version --commit-count <n> [--root <dir>] [--github-output <file>]` prints
-//!   `version=<major>.<minor>.<n>`, the
-//!   workspace version's major and minor with the number of commits on `main` as the patch: a
-//!   commit always gets the same version, and a later commit a higher one.
+//! - `version --commit-count <n> | --commit-count-file <file> [--root <dir>] [--github-output
+//!   <file>]` prints `version=<major>.<minor>.<n>`, the workspace version's major and minor with
+//!   the number of commits on `main` as the patch (given, or read from a file holding what
+//!   `git rev-list --count` printed): a commit always gets the same version, and a later commit
+//!   a higher one.
 //! - `stamp --version <x.y.z> [--root <dir>]` writes that version into `Cargo.toml`
 //!   (`[workspace.package]`) and into `Cargo.lock` for every workspace crate, so the binaries
 //!   print it and `--locked` still holds.
 //! - `check-static --binary <file>` refuses a binary that needs a program interpreter (a
 //!   dynamic loader): the released binaries run on any Linux of their architecture.
 //! - `image ...` writes the container image tar (`release/image.rs`).
+//! - `check-output --expect <line> -- <program> [<arg>...]` runs the program and passes when
+//!   it exits 0 and its whole standard output is that one line (`release/check_output.rs`).
 //! - `sums --dir <dir> --version <v> [--github-output <file>]` refuses a directory whose files
 //!   are not exactly the release's [`assets`], writes `SHA256SUMS` over them and prints
 //!   `sha256=<its SHA-256>`.
@@ -18,6 +21,7 @@
 //! With `--github-output`, the printed `key=value` line is also appended to that file (the
 //! step's `$GITHUB_OUTPUT`), so a step is one command.
 
+mod check_output;
 mod image;
 
 use std::collections::BTreeMap;
@@ -29,7 +33,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::Report;
 
-const USAGE: &str = "usage: xtask release version --commit-count <n> [--root <dir>] [--github-output <file>] | stamp --version <x.y.z> [--root <dir>] | check-static --binary <file> | image --binary <file> --version <v> --commit <40 hex> --created <unix seconds> --platform linux/amd64|linux/arm64 --out <file> | sums --dir <dir> --version <v> [--github-output <file>]";
+const USAGE: &str = "usage: xtask release version --commit-count <n> | --commit-count-file <file> [--root <dir>] [--github-output <file>] | stamp --version <x.y.z> [--root <dir>] | check-static --binary <file> | image --binary <file> --version <v> --commit <40 hex> --created <unix seconds> --platform linux/amd64|linux/arm64 --out <file> | check-output --expect <line> -- <program> [<arg>...] | sums --dir <dir> --version <v> [--github-output <file>]";
 
 /// The program and image name every asset starts with.
 pub const NAME: &str = "docker-swarm-updater";
@@ -59,12 +63,27 @@ pub(crate) fn run(args: &[String]) -> Result<Report, String> {
     };
     match verb.as_str() {
         "version" => {
-            let flags = flags(rest, &["--commit-count", "--root", "--github-output"])?;
-            let count = required(&flags, "--commit-count")?;
+            let flags = flags(
+                rest,
+                &[
+                    "--commit-count",
+                    "--commit-count-file",
+                    "--root",
+                    "--github-output",
+                ],
+            )?;
+            let count = match (
+                flags.get("--commit-count"),
+                flags.get("--commit-count-file"),
+            ) {
+                (Some(count), None) => (*count).to_owned(),
+                (None, Some(file)) => read(Path::new(file))?.trim().to_owned(),
+                _ => return Err("give one of --commit-count and --commit-count-file".into()),
+            };
             let root = root(&flags);
             let line = format!(
                 "version={}\n",
-                version(&read(&root.join("Cargo.toml"))?, count)?
+                version(&read(&root.join("Cargo.toml"))?, &count)?
             );
             output(&flags, &line)?;
             Ok(passed(line))
@@ -92,6 +111,7 @@ pub(crate) fn run(args: &[String]) -> Result<Report, String> {
             })
         }
         "image" => image::run(rest),
+        "check-output" => check_output::run(rest),
         "sums" => {
             let flags = flags(rest, &["--dir", "--version", "--github-output"])?;
             let dir = PathBuf::from(required(&flags, "--dir")?);
