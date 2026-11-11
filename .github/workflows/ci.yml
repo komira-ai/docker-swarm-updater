@@ -41,14 +41,14 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: cargo-${{ runner.os }}-${{ github.job }}-
-      # install-action checks each tool's release archive against its recorded SHA-256.
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
-        with:
-          tool: cargo-deny@0.20.2,actionlint@1.7.7
+      # Tools pinned by version: cargo checks each crate against the crates.io index's
+      # checksum, and go against the Go checksum database.
+      - run: cargo install --locked cargo-deny@0.20.2
+      - run: go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo deny --locked check bans licenses sources
-      - run: actionlint
+      - run: ~/go/bin/actionlint
 
   # The tests under nextest with line and branch coverage, then every crate held to the
   # floors in its own Cargo.toml (at least 99% of lines and of branches). Branch coverage
@@ -73,8 +73,8 @@ jobs:
             target
           key: cargo-${{ runner.os }}-${{ github.job }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: cargo-${{ runner.os }}-${{ github.job }}-
-      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
-        with:
-          tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.146
+      # Pinned by version; cargo checks each crate against the crates.io index's checksum.
+      - run: cargo install --locked cargo-llvm-cov@0.9.1
+      - run: cargo install --locked cargo-nextest@0.9.146
       - run: cargo "+$COVERAGE_TOOLCHAIN" llvm-cov nextest --workspace --locked --profile coverage --branch --lcov --output-path lcov.info
       - run: cargo "+$COVERAGE_TOOLCHAIN" xtask coverage --lcov lcov.info --root "$GITHUB_WORKSPACE" --summary "$GITHUB_STEP_SUMMARY"
