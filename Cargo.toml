@@ -56,13 +56,15 @@ webpki-roots = "1.0.4"
 # Test only (dsu-testkit and dev-dependencies): the test CA, the test log and timestamp
 # authority, and scratch directories.
 aws-lc-rs = "1.15.1"
-cms = { version = "0.2.3", features = ["builder"] }
+# Without `builder`: the test time-stamp token is assembled by hand (dsu-testkit mint.rs), and
+# `builder` would pull in the rsa crate, which nothing here uses.
+cms = { version = "0.2.3", default-features = false, features = ["std"] }
 const-oid = { version = "0.9.6", features = ["db"] }
 der = { version = "0.7.10", features = ["alloc", "derive", "oid", "std"] }
 rcgen = { version = "0.14.5", default-features = false, features = ["aws_lc_rs", "pem", "crypto"] }
 tempfile = "3.23.0"
 # Reads the workflow files in the tests that hold them to what they must do.
-serde_yaml_ng = "0.10.0"
+yaml-rust2 = { version = "0.13.0", default-features = false }
 x509-cert = { version = "0.2.5", features = ["builder"] }
 
 [workspace.lints.rust]
