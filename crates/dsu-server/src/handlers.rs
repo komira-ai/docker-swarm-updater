@@ -21,8 +21,10 @@ use serde::Serialize;
 
 use crate::app::{App, image_digest, image_reference};
 use crate::auth::Authenticated;
+use crate::clock::with_deadline;
 use crate::deployer::{Admission, Candidate};
 use crate::runner::{self, Job};
+use crate::server::IDLE_TIMEOUT;
 
 /// A successful answer: its status and its JSON body (empty for 204).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,9 +60,20 @@ impl From<crate::store::StoreError> for ApiError {
     }
 }
 
-/// The body, at most [`MAX_BODY_BYTES`]; a longer one is 413 and is not read further.
-async fn read_body(body: Incoming) -> Result<Bytes, ApiError> {
-    match Limited::new(body, MAX_BODY_BYTES).collect().await {
+/// The body, at most [`MAX_BODY_BYTES`]; a longer one is 413 and is not read further. A body
+/// still incomplete when [`IDLE_TIMEOUT`] has passed is `bad_request`: a connection that
+/// sends nothing for that long is closed.
+async fn read_body(app: &App, body: Incoming) -> Result<Bytes, ApiError> {
+    let read = with_deadline(
+        app.clock.as_ref(),
+        IDLE_TIMEOUT,
+        Limited::new(body, MAX_BODY_BYTES).collect(),
+    )
+    .await
+    .map_err(|timed_out| {
+        ApiError::BadRequest(format!("the request body took too long: {timed_out}"))
+    })?;
+    match read {
         Ok(collected) => Ok(collected.to_bytes()),
         Err(e) if e.is::<LengthLimitError>() => Err(ApiError::PayloadTooLarge(format!(
             "the request body is longer than {MAX_BODY_BYTES} bytes"
@@ -97,7 +110,7 @@ pub async fn deploy(
     body: Incoming,
 ) -> Result<Reply, ApiError> {
     let service = actionable(app, auth, name)?;
-    let request = DeployRequest::from_json(&read_body(body).await?)?;
+    let request = DeployRequest::from_json(&read_body(app, body).await?)?;
     request.check_allow_older(auth.principal)?;
     request.check_signer(&service.signer)?;
     let spec = ReleaseSpec {

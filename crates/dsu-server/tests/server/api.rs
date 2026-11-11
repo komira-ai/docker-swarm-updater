@@ -318,8 +318,17 @@ async fn request_rows() {
             "{field}"
         );
     }
-    let r = post(&u, deploy_body("app", 5, |b| b["signer"] = signer())).await;
+    // A signer that equals the configured one, and a version of 128 bytes, are accepted.
+    let r = post(
+        &u,
+        deploy_body("app", 5, |b| {
+            b["signer"] = signer();
+            b["version"] = json!("v".repeat(128));
+        }),
+    )
+    .await;
     assert_eq!(r.status, 202);
+    assert_eq!(r.json()["version"], "v".repeat(128));
     // A body of 16 KiB is read; of 16 KiB + 1 it is 413.
     let padded = |len: usize| {
         let mut body = deploy_body("app", 5, |_| {});
@@ -358,6 +367,189 @@ async fn a_body_that_ends_early_is_a_bad_request() {
 }
 
 #[tokio::test]
+async fn a_request_body_that_stalls_is_a_bad_request_once_the_idle_time_has_passed() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (env, u) = setup().await;
+    u.set_peer(PROXY);
+    let head = http(
+        "POST",
+        &deploys("app"),
+        &[("x-dsu-claims", u.token(&caller("app")))],
+        b"",
+    );
+    let mut request = String::from_utf8(head)
+        .unwrap()
+        .replace("content-length: 0", "content-length: 100")
+        .into_bytes();
+    request.extend_from_slice(b"{\"image");
+    let mut stream = tokio::net::UnixStream::connect(u.socket()).await.unwrap();
+    stream.write_all(&request).await.unwrap();
+    // The handler waits for the other 93 bytes under a deadline of the clock; the test moves it.
+    env.clock.wait_pending().await;
+    env.clock.advance(dsu_server::server::IDLE_TIMEOUT);
+    let mut data = Vec::new();
+    stream.read_to_end(&mut data).await.unwrap();
+    let r = parse_reply(&data);
+    assert_eq!((r.status, r.error().as_str()), (400, "bad_request"));
+    assert!(r.json()["detail"].as_str().unwrap().contains("too long"));
+    assert!(env.state_files("deploys").is_empty());
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_connection_idle_for_30_seconds_is_closed() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (_env, u) = setup().await;
+    // Nothing is sent: tokio's paused time moves to the server's timer, which closes it.
+    let mut silent = tokio::net::UnixStream::connect(u.socket()).await.unwrap();
+    let mut data = Vec::new();
+    let _ = silent.read_to_end(&mut data).await;
+    assert!(data.is_empty(), "{:?}", String::from_utf8_lossy(&data));
+    // One request is answered and the connection is kept; then it sits idle and is closed.
+    let mut kept = tokio::net::UnixStream::connect(u.socket()).await.unwrap();
+    kept.write_all(b"GET /v1/health HTTP/1.1\r\nhost: dsu\r\n\r\n")
+        .await
+        .unwrap();
+    let mut data = Vec::new();
+    let mut buffer = [0u8; 1024];
+    while !data.ends_with(b"}") {
+        let n = kept.read(&mut buffer).await.unwrap();
+        assert_ne!(n, 0, "closed before the answer");
+        data.extend_from_slice(&buffer[..n]);
+    }
+    assert_eq!(parse_reply(&data).status, 200);
+    let mut rest = Vec::new();
+    let _ = kept.read_to_end(&mut rest).await;
+    assert!(rest.is_empty());
+}
+
+#[tokio::test]
+async fn a_refused_request_writes_no_record() {
+    let (env, u) = setup().await;
+    let (app, web) = (caller("app"), caller("web"));
+    u.app
+        .store
+        .update_service(&ServiceName::parse("app").unwrap(), |s| {
+            s.add_failed(digest(8))
+        })
+        .await
+        .unwrap();
+    let body = |n: u8, edit: fn(&mut Value)| deploy_body("app", n, edit);
+    let spent = u.token_with(&app, "spent", 300);
+    assert_eq!(
+        u.call(PROXY, "GET", LIST, Some(spent.clone()), b"")
+            .await
+            .status,
+        200
+    );
+    let signer = |b: &mut Value| {
+        b["signer"] = json!({
+            "repository": "example-org/other",
+            "workflow": ".github/workflows/artifacts.yml",
+            "ref": "refs/heads/main",
+        })
+    };
+    /// What is asked, as which peer, with which claims and body; the token that refuses it.
+    type Refusal<'a> = (&'a str, u32, Option<String>, Vec<u8>, &'a str);
+    let refusals: Vec<Refusal> = vec![
+        (
+            "bad_peer",
+            OTHER,
+            Some(u.token(&app)),
+            body(5, |_| {}),
+            "bad_peer",
+        ),
+        ("no_claims", PROXY, None, body(5, |_| {}), "no_claims"),
+        (
+            "expired",
+            PROXY,
+            Some(u.token_with(&app, "old", -1)),
+            body(5, |_| {}),
+            "expired",
+        ),
+        ("replayed", PROXY, Some(spent), body(5, |_| {}), "replayed"),
+        (
+            "not_allowed",
+            PROXY,
+            Some(u.token(&web)),
+            body(5, |_| {}),
+            "not_allowed",
+        ),
+        (
+            "bad body",
+            PROXY,
+            Some(u.token(&app)),
+            b"{".to_vec(),
+            "bad_request",
+        ),
+        (
+            "allow_older",
+            PROXY,
+            Some(u.token(&app)),
+            body(5, |b| b["allow_older"] = json!(true)),
+            "bad_request",
+        ),
+        (
+            "signer",
+            PROXY,
+            Some(u.token(&app)),
+            body(5, signer),
+            "signer_mismatch",
+        ),
+        (
+            "url",
+            PROXY,
+            Some(u.token(&app)),
+            body(5, |b| {
+                b["image_url"] = json!(
+                    "https://github.com/other/app/releases/download/v1/app-1.0-linux-x86_64.image.tar"
+                )
+            }),
+            "url_not_allowed",
+        ),
+        (
+            "failed list",
+            PROXY,
+            Some(u.token(&app)),
+            body(8, |_| {}),
+            "previously_failed",
+        ),
+        (
+            "too large",
+            PROXY,
+            Some(u.token(&app)),
+            vec![b' '; 16 * 1024 + 1],
+            "payload_too_large",
+        ),
+    ];
+    for (what, uid, claims, body, token) in refusals {
+        let r = u.call(uid, "POST", &deploys("app"), claims, &body).await;
+        assert_eq!(r.error(), token, "{what}");
+        assert!(env.state_files("deploys").is_empty(), "{what}");
+    }
+    let r = u
+        .call(
+            PROXY,
+            "POST",
+            &deploys("nope"),
+            Some(u.token(&app)),
+            &body(5, |_| {}),
+        )
+        .await;
+    assert_eq!(r.error(), "unknown_service");
+    assert!(env.state_files("deploys").is_empty());
+    // A deploy that is accepted is the only record; the busy refusal next to it adds none.
+    let r = u
+        .as_caller(&app, "POST", &deploys("app"), &body(5, |_| {}))
+        .await;
+    assert_eq!(r.status, 202);
+    let r = u
+        .as_caller(&app, "POST", &deploys("app"), &body(6, |_| {}))
+        .await;
+    assert_eq!(r.error(), "busy");
+    assert_eq!(env.state_files("deploys").len(), 1);
+}
+
+#[tokio::test]
 async fn url_rows() {
     let (_env, u) = setup().await;
     let app = caller("app");
@@ -373,6 +565,15 @@ async fn url_rows() {
         "https://github.com/example-org/app/releases/download/v1/app-1.0-linux-x86_64.image.tar?x=1",
         "https://github.com/example-org/app/releases/download/v1/app-1.0-linux-arm64.image.tar",
         "http://github.com/example-org/app/releases/download/v1/app-1.0-linux-x86_64.image.tar",
+        "https://github.com/example-org/app/releases/download/v1/app-1.0-linux-x86_64.image.tar#x",
+        "https://github.com/example-org/app/releases/download/./app-1.0-linux-x86_64.image.tar",
+        "https://github.com/example-org/app/releases/download/v1\\x/app-1.0-linux-x86_64.image.tar",
+        "https://github.com/example-org/app/releases/download//app-1.0-linux-x86_64.image.tar",
+        "https://github.com/example-org/app/releases/download/v1/x/app-1.0-linux-x86_64.image.tar",
+        "https://github.com/example-org/app/releases/v1/app-1.0-linux-x86_64.image.tar",
+        "https://www.github.com/example-org/app/releases/download/v1/app-1.0-linux-x86_64.image.tar",
+        "https://github.com.example.test/example-org/app/releases/download/v1/app-1.0-linux-x86_64.image.tar",
+        "https://objects.githubusercontent.com/example-org/app/releases/download/v1/app-1.0-linux-x86_64.image.tar",
         "not a url",
     ];
     for image in bad_images {
@@ -393,6 +594,8 @@ async fn url_rows() {
             "{image}"
         );
     }
+    // A refusal is a 403 and writes no record.
+    assert!(_env.state_files("deploys").is_empty());
     // A bundle URL that is not the image's plus .sigstore.json.
     for bundle in [
         format!("{good}.sig"),

@@ -54,7 +54,7 @@ fn the_good_config_loads() {
 #[test]
 fn each_refusal_of_section_2_3_names_the_key() {
     let files = Files::new();
-    let cases: [(&str, &str, &str, &str); 7] = [
+    let cases: &[(&str, &str, &str, &str)] = &[
         (
             "two services on one swarm_service",
             "swarm_service = \"web_server\"",
@@ -97,11 +97,136 @@ fn each_refusal_of_section_2_3_names_the_key() {
             "keep_previous = 3\nsurprise = 1",
             "surprise",
         ),
+        (
+            "an unknown key of a service",
+            "platform = \"linux/amd64\"",
+            "platform = \"linux/amd64\"\nsurprise = 1",
+            "surprise",
+        ),
+        (
+            "two services of one name",
+            "name = \"web\"",
+            "name = \"app\"",
+            "service[1].name",
+        ),
+        (
+            "a workflow with a dot-dot segment",
+            "workflow = \".github/workflows/artifacts.yml\"",
+            "workflow = \".github/workflows/../artifacts.yml\"",
+            "service[0].signer.workflow",
+        ),
+        (
+            "a workflow that is not a yml file",
+            "workflow = \".github/workflows/artifacts.yml\"",
+            "workflow = \".github/workflows/artifacts.txt\"",
+            "service[0].signer.workflow",
+        ),
+        (
+            "a workflow with a leading slash",
+            "workflow = \".github/workflows/artifacts.yml\"",
+            "workflow = \"/.github/workflows/artifacts.yml\"",
+            "service[0].signer.workflow",
+        ),
+        (
+            "an artifact_name with a slash",
+            "artifact_name = \"app-*-linux-x86_64.image.tar\"",
+            "artifact_name = \"app/*.tar\"",
+            "service[0].artifact_name",
+        ),
+        (
+            "a redirect host with a port",
+            "redirect_hosts = [\"objects.githubusercontent.com\"]",
+            "redirect_hosts = [\"objects.githubusercontent.com:443\"]",
+            "redirect_hosts[0]",
+        ),
+        (
+            "a redirect host with a path",
+            "redirect_hosts = [\"objects.githubusercontent.com\"]",
+            "redirect_hosts = [\"objects.githubusercontent.com/x\"]",
+            "redirect_hosts[0]",
+        ),
+        (
+            "a redirect host with user info",
+            "redirect_hosts = [\"objects.githubusercontent.com\"]",
+            "redirect_hosts = [\"me@objects.githubusercontent.com\"]",
+            "redirect_hosts[0]",
+        ),
+        (
+            "a redirect host in upper case",
+            "redirect_hosts = [\"objects.githubusercontent.com\"]",
+            "redirect_hosts = [\"Objects.githubusercontent.com\"]",
+            "redirect_hosts[0]",
+        ),
+        (
+            "an empty redirect host",
+            "redirect_hosts = [\"objects.githubusercontent.com\"]",
+            "redirect_hosts = [\"\"]",
+            "redirect_hosts[0]",
+        ),
+        (
+            "a platform that is not os/architecture",
+            "platform = \"linux/amd64\"",
+            "platform = \"linux\"",
+            "service[0].platform",
+        ),
+        (
+            "no trigger",
+            "triggers = [\"push\"]",
+            "triggers = []",
+            "service[0].signer.triggers",
+        ),
+        (
+            "an empty registry",
+            "registry = \"127.0.0.1:5000\"",
+            "registry = \"\"",
+            "registry",
+        ),
     ];
     for (what, from, to, key) in cases {
         let message = files.refused(|text| replace_first(text, from, to));
         assert!(message.contains(key), "{what}: {message}");
     }
+}
+
+#[test]
+fn every_empty_claim_of_a_caller_and_a_service_without_a_caller_name_their_key() {
+    let files = Files::new();
+    for claim in [
+        "repository",
+        "repository_id",
+        "job_workflow_ref",
+        "ref",
+        "environment",
+        "runner_environment",
+    ] {
+        let message = files.refused(|text| {
+            let prefix = format!("  {claim} = ");
+            let mut done = false;
+            text.lines()
+                .map(|line| {
+                    if !done && line.starts_with(&prefix) {
+                        done = true;
+                        format!("{prefix}\"\"")
+                    } else {
+                        line.to_owned()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+        let key = format!("service[0].caller[0].{claim}");
+        assert!(message.contains(&key), "{claim}: {message}");
+    }
+    // The first service's `[[service.caller]]` table and its six claims are removed.
+    let message = files.refused(|text| {
+        let lines: Vec<&str> = text.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| l.starts_with("  [[service.caller]]"))
+            .unwrap();
+        [&lines[..at], &lines[at + 7..]].concat().join("\n")
+    });
+    assert!(message.contains("service[0].caller"), "{message}");
 }
 
 #[test]
