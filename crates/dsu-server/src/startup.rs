@@ -1,10 +1,6 @@
 //! What must hold before the updater serves or imports anything: the config file and its
 //! checks (docs/design.md section 2.3), the trusted-root file, the CA file, and the refusals
 //! of the flags. A refusal names the key or flag.
-#![allow(
-    clippy::disallowed_types,
-    reason = "this module opens the trusted-root file once and checks what it reads; only the pure core may not do file I/O"
-)]
 
 use std::io::Read as _;
 use std::os::unix::fs::MetadataExt as _;

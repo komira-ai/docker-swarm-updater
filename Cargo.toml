@@ -64,6 +64,10 @@ unsafe_code = "forbid"
 missing_docs = "warn"
 
 [workspace.lints.clippy]
+# clippy.toml lists what the pure core (dsu-core) may not use; its lib.rs denies these two
+# lints, every other crate may use those items.
+disallowed_methods = "allow"
+disallowed_types = "allow"
 unwrap_used = "deny"
 expect_used = "deny"
 

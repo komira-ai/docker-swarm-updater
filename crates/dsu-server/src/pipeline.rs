@@ -7,10 +7,6 @@
 //! (`dsu-verify`); then every blob and the platform. [`push_tar`] writes what
 //! [`verify_tar`] approved to the registry. Section 3.3 step 5 (the signed-time floor) needs
 //! the service's state and is the caller's.
-#![allow(
-    clippy::disallowed_types,
-    reason = "this module reads the tar file by offsets; only the pure core may not do file I/O"
-)]
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;

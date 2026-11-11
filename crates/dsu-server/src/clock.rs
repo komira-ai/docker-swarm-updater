@@ -30,10 +30,6 @@ pub trait Clock: Send + Sync {
 pub struct SystemClock;
 
 impl Clock for SystemClock {
-    #[allow(
-        clippy::disallowed_methods,
-        reason = "the real clock is the one place the system time is read"
-    )]
     fn now(&self) -> jiff::Timestamp {
         jiff::Timestamp::now()
     }

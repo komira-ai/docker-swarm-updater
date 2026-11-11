@@ -2,7 +2,8 @@
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 # Items the pure crate (dsu-core) must not use: it takes time and I/O as inputs. Its lib.rs
-# denies clippy::disallowed_methods and clippy::disallowed_types; other crates allow them.
+# denies clippy::disallowed_methods and clippy::disallowed_types; the workspace lints allow
+# them in every other crate (root Cargo.toml).
 disallowed-methods = [
     { path = "std::time::Instant::now", reason = "the pure core takes time as an input" },
     { path = "std::time::SystemTime::now", reason = "the pure core takes time as an input" },
