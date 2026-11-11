@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use clap::Parser as _;
 use dsu_deploy::client::Clock as _;
-use dsu_deploy::{Cli, SystemClock, parse_endpoint, run};
+use dsu_deploy::{Cli, EndpointError, SystemClock, parse_endpoint, run};
 use support::{DIGEST, FakeClock, FakeHttp, ID, TOKEN_URL, answer, error_body, record};
 
 fn args(extra: &[(&str, &str)]) -> Vec<OsString> {
@@ -166,22 +166,40 @@ fn the_endpoint_is_a_scheme_host_and_port_only() {
         "http://deploy.example/?q=1",
         "http://deploy.example/#f",
     ] {
+        let error = parse_endpoint(text).unwrap_err();
         assert_eq!(
-            parse_endpoint(text).unwrap_err(),
+            error,
+            EndpointError::NotBare {
+                text: text.to_owned()
+            }
+        );
+        assert_eq!(
+            error.to_string(),
             format!(
                 "{text:?}: give the scheme, host and port only (no user, path, query or fragment)"
             )
         );
     }
     assert_eq!(
-        parse_endpoint("ftp://deploy.example").unwrap_err(),
+        parse_endpoint("ftp://deploy.example")
+            .unwrap_err()
+            .to_string(),
         "\"ftp://deploy.example\": the scheme must be http or https"
     );
+    // A host with a port and no scheme parses as the scheme `deploy.example`.
     assert_eq!(
         parse_endpoint("deploy.example:8450").unwrap_err(),
-        "\"deploy.example:8450\": the scheme must be http or https"
+        EndpointError::Scheme {
+            text: "deploy.example:8450".to_owned()
+        }
     );
-    assert!(parse_endpoint("http://").is_err());
+    assert_eq!(
+        parse_endpoint("http://").unwrap_err(),
+        EndpointError::NotAUrl {
+            text: "http://".to_owned(),
+            reason: "empty host".to_owned()
+        }
+    );
 }
 
 #[test]

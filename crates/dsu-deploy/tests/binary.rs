@@ -21,9 +21,30 @@ fn answer(method: &str, target: &str) -> (u16, Vec<u8>) {
     }
 }
 
+/// A loopback port with no listener: a proxy there refuses every connection.
+fn dead_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap().port()
+}
+
 fn deploy(server: &Server, service: &str, bearer: Option<&str>) -> std::process::Output {
     let mut command = Command::new(env!("CARGO_BIN_EXE_dsu-deploy"));
+    // Proxy settings in the environment are not read: were they used, every request would go
+    // to a port that refuses it.
+    let proxy = format!("http://127.0.0.1:{}", dead_port());
+    for name in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ] {
+        command.env(name, &proxy);
+    }
     command
+        .env_remove("NO_PROXY")
+        .env_remove("no_proxy")
         .args(["--endpoint", &server.url("")])
         .args(["--service", service])
         .args(["--image-digest", DIGEST])
@@ -43,24 +64,30 @@ fn deploy(server: &Server, service: &str, bearer: Option<&str>) -> std::process:
 }
 
 #[test]
-fn the_binary_deploys_with_the_bearer_from_the_environment() {
+fn the_binary_deploys_with_the_bearer_from_the_environment_and_prints_no_token() {
     let server = Server::start(answer);
     let output = deploy(&server, "app", Some("request-bearer"));
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert_eq!(output.status.code(), Some(0), "{stdout}");
-    assert!(
-        stdout.ends_with(&format!("deploy {ID} converged\n")),
-        "{stdout}"
+    // The whole output: neither the request bearer nor the minted token is in it.
+    assert_eq!(
+        stdout,
+        format!(
+            "deploy app {DIGEST} (version 1) at {endpoint}\n\
+             deploy {ID}: converged, phase done\n\
+             deploy {ID} converged\n",
+            endpoint = server.url("")
+        )
     );
     let seen = server.seen();
+    assert_eq!(seen.len(), 2);
     assert_eq!(seen[0].target, "/token?api-version=2.0&audience=aud");
     assert_eq!(
         seen[0].authorization.as_deref(),
         Some("Bearer request-bearer")
     );
+    assert_eq!(seen[1].target, "/v1/services/app/deploys");
     assert_eq!(seen[1].authorization.as_deref(), Some("Bearer oidc-token"));
-    // The bearer of the token request is never printed.
-    assert!(!stdout.contains("request-bearer"));
 }
 
 #[test]
@@ -68,13 +95,20 @@ fn the_binary_exits_1_on_a_refusal_and_2_without_the_bearer() {
     let server = Server::start(answer);
     let output = deploy(&server, "web", Some("request-bearer"));
     assert_eq!(output.status.code(), Some(1));
-    assert!(
-        String::from_utf8(output.stdout)
-            .unwrap()
-            .ends_with("::error::deploy refused: 409 busy: another deploy runs\n")
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!(
+            "deploy web {DIGEST} (version 1) at {endpoint}\n\
+             ::error::deploy refused: 409 busy: another deploy runs\n",
+            endpoint = server.url("")
+        )
     );
 
     let output = deploy(&server, "app", None);
     assert_eq!(output.status.code(), Some(2));
-    assert!(server.seen().len() == 2, "nothing more was sent");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "::error::ACTIONS_ID_TOKEN_REQUEST_TOKEN is not set: the job needs `permissions: id-token: write`\n"
+    );
+    assert_eq!(server.seen().len(), 2, "nothing more was sent");
 }

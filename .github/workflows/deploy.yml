@@ -117,9 +117,10 @@ jobs:
       group: docker-swarm-updater-deploy-${{ inputs.service }}
       cancel-in-progress: false
     steps:
-      - name: Refuse a runner that does not name this workflow's own commit
+      # Without them the checkout below would take the caller's repository instead.
+      - name: Refuse a runner that does not set job.workflow_repository and job.workflow_sha
         if: ${{ job.workflow_repository == '' || job.workflow_sha == '' }}
-        run: echo "::error::this runner does not set job.workflow_repository and job.workflow_sha, so the deploy client cannot be built from this workflow's commit" && exit 1
+        run: exit 1
       # Tailscale is fetched by version and checked against its SHA-256 (linux amd64, the
       # runner above), never taken from a cache.
       - name: Join the tailnet

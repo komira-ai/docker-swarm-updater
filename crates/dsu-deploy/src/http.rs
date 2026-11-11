@@ -1,6 +1,8 @@
 //! [`Http`] over ureq: plain HTTP for the deploy front inside the tailnet, HTTPS with the
 //! Mozilla roots for GitHub's token endpoint. Redirects are not followed, any status is an
-//! answer, and every request has [`REQUEST_TIMEOUT`] from connect to the last byte.
+//! answer, every request has [`REQUEST_TIMEOUT`] from connect to the last byte, and no proxy
+//! is used: ureq's default would read `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY` and `NO_PROXY`
+//! from the environment, and this client reads no setting from there.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -32,6 +34,7 @@ impl UreqHttp {
             .build();
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .tls_config(tls)
+            .proxy(None)
             .max_redirects(0)
             .max_redirects_will_error(false)
             .http_status_as_error(false)

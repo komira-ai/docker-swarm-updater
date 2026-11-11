@@ -1,7 +1,8 @@
 //! `cargo xtask release <verb>`: the steps of `.github/workflows/artifacts.yml` that are more
 //! than one command, so the workflow runs one named command per step and the logic has tests.
 //!
-//! - `version --commit-count <n> [--root <dir>]` prints `version=<major>.<minor>.<n>`, the
+//! - `version --commit-count <n> [--root <dir>] [--github-output <file>]` prints
+//!   `version=<major>.<minor>.<n>`, the
 //!   workspace version's major and minor with the number of commits on `main` as the patch: a
 //!   commit always gets the same version, and a later commit a higher one.
 //! - `stamp --version <x.y.z> [--root <dir>]` writes that version into `Cargo.toml`
@@ -9,21 +10,26 @@
 //!   print it and `--locked` still holds.
 //! - `check-static --binary <file>` refuses a binary that needs a program interpreter (a
 //!   dynamic loader): the released binaries run on any Linux of their architecture.
-//! - `image ...` writes the container image tar, see [`image`].
-//! - `sums --dir <dir> --version <v>` refuses a directory whose files are not exactly the
-//!   release's [`assets`], writes `SHA256SUMS` over them and prints `sha256=<its SHA-256>`.
+//! - `image ...` writes the container image tar (`release/image.rs`).
+//! - `sums --dir <dir> --version <v> [--github-output <file>]` refuses a directory whose files
+//!   are not exactly the release's [`assets`], writes `SHA256SUMS` over them and prints
+//!   `sha256=<its SHA-256>`.
+//!
+//! With `--github-output`, the printed `key=value` line is also appended to that file (the
+//! step's `$GITHUB_OUTPUT`), so a step is one command.
 
-pub mod image;
+mod image;
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest as _, Sha256};
 
 use crate::Report;
 
-const USAGE: &str = "usage: xtask release version --commit-count <n> [--root <dir>] | stamp --version <x.y.z> [--root <dir>] | check-static --binary <file> | image --binary <file> --version <v> --commit <40 hex> --created <unix seconds> --platform linux/amd64|linux/arm64 --out <file> | sums --dir <dir> --version <v>";
+const USAGE: &str = "usage: xtask release version --commit-count <n> [--root <dir>] [--github-output <file>] | stamp --version <x.y.z> [--root <dir>] | check-static --binary <file> | image --binary <file> --version <v> --commit <40 hex> --created <unix seconds> --platform linux/amd64|linux/arm64 --out <file> | sums --dir <dir> --version <v> [--github-output <file>]";
 
 /// The program and image name every asset starts with.
 pub const NAME: &str = "docker-swarm-updater";
@@ -53,13 +59,15 @@ pub(crate) fn run(args: &[String]) -> Result<Report, String> {
     };
     match verb.as_str() {
         "version" => {
-            let flags = flags(rest, &["--commit-count", "--root"])?;
+            let flags = flags(rest, &["--commit-count", "--root", "--github-output"])?;
             let count = required(&flags, "--commit-count")?;
             let root = root(&flags);
-            Ok(passed(format!(
+            let line = format!(
                 "version={}\n",
                 version(&read(&root.join("Cargo.toml"))?, count)?
-            )))
+            );
+            output(&flags, &line)?;
+            Ok(passed(line))
         }
         "stamp" => {
             let flags = flags(rest, &["--version", "--root"])?;
@@ -85,9 +93,13 @@ pub(crate) fn run(args: &[String]) -> Result<Report, String> {
         }
         "image" => image::run(rest),
         "sums" => {
-            let flags = flags(rest, &["--dir", "--version"])?;
+            let flags = flags(rest, &["--dir", "--version", "--github-output"])?;
             let dir = PathBuf::from(required(&flags, "--dir")?);
-            sums(&dir, required(&flags, "--version")?)
+            let report = sums(&dir, required(&flags, "--version")?)?;
+            if report.passed {
+                output(&flags, &report.text)?;
+            }
+            Ok(report)
         }
         _ => Err(USAGE.into()),
     }
@@ -95,6 +107,24 @@ pub(crate) fn run(args: &[String]) -> Result<Report, String> {
 
 fn passed(text: String) -> Report {
     Report { text, passed: true }
+}
+
+/// Appends `line` to the `--github-output` file, when one is given.
+fn output(flags: &BTreeMap<&str, &str>, line: &str) -> Result<(), String> {
+    let Some(path) = flags.get("--github-output") else {
+        return Ok(());
+    };
+    std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(path)
+        .and_then(|mut file| file.write_all(line.as_bytes()))
+        .map_err(|e| format!("writing {path}: {e}"))
+}
+
+/// Writes `bytes` to `path`.
+fn write_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    std::fs::write(path, bytes).map_err(|e| format!("writing {}: {e}", path.display()))
 }
 
 /// `--flag value` pairs, each flag one of `known` and given once.
@@ -186,10 +216,8 @@ fn stamp(root: &Path, version: &str) -> Result<(), String> {
     let old = workspace_version(&cargo_toml)?;
     let new_toml = stamp_manifest(&cargo_toml, &old, version)?;
     let new_lock = stamp_lock(&lock, &old, version)?;
-    std::fs::write(&toml_path, new_toml)
-        .map_err(|e| format!("writing {}: {e}", toml_path.display()))?;
-    std::fs::write(&lock_path, new_lock)
-        .map_err(|e| format!("writing {}: {e}", lock_path.display()))
+    write_file(&toml_path, new_toml.as_bytes())?;
+    write_file(&lock_path, new_lock.as_bytes())
 }
 
 /// `cargo_toml` with the `version` line of `[workspace.package]` set to `new`.
@@ -317,7 +345,7 @@ fn sums(dir: &Path, version: &str) -> Result<Report, String> {
         let _ = writeln!(text, "{}  {name}", hex::encode(Sha256::digest(&bytes)));
     }
     let path = dir.join("SHA256SUMS");
-    std::fs::write(&path, &text).map_err(|e| format!("writing {}: {e}", path.display()))?;
+    write_file(&path, text.as_bytes())?;
     Ok(passed(format!(
         "sha256={}\n",
         hex::encode(Sha256::digest(text.as_bytes()))

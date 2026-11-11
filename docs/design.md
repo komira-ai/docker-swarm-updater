@@ -431,13 +431,14 @@ after the hand-off for restarts, the size and free-space limits). A new error to
   no coverage exclusions.
 - Workflows: GitHub-hosted runners only, actions pinned by commit, top-level `permissions: {}`, each job granting only what it uses,
   actionlint clean.
-- Releases from `main`: every push to `main` runs `artifacts.yml`, which releases `v<major>.<minor>.<commits on main>` (the same commit
+- Releases from `main`: each push to `main` runs `artifacts.yml` (a newer push waiting for the previous run supersedes an older
+  one that has not started), which releases `v<major>.<minor>.<commits on main>` (the same commit
   always gets the same version, a later one a higher one) with, for `linux-x86_64` and `linux-arm64`, the static binary and the image
   tar: an OCI layout written by `cargo xtask release image`, `FROM scratch`, the binary at `/docker-swarm-updater` as the entrypoint,
   user `65532:65532`, every time the commit's, plus Docker's `manifest.json` so `docker load` reads it. Before signing it checks that
   the binary has no program interpreter and prints the version, that rebuilding the workspace's crates gives the same binary byte for
   byte, that the image written twice is the same bytes, and that the image loads and runs. Only its `attest` job holds
-  `id-token: write` and `attestations: write`, and runs no repository code; every released file gets its own `.sigstore.json`, which
+  `id-token: write` and `attestations: write`, and runs no repository code; each binary and image gets its own `.sigstore.json`, which
   `verify` checks against this signer before `publish` creates the release. `artifacts.yml` is the signer identity, so it is never
   renamed.
 - **The reusable workflow** `.github/workflows/deploy.yml` (`on: workflow_call`). Inputs: `service`, `version`, `image-digest`,

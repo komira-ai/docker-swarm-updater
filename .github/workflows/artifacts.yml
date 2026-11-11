@@ -1,5 +1,6 @@
-# The release of docker-swarm-updater, made by every push to main (docs/design.md section 7):
-# for linux-x86_64 and linux-arm64, the static binary `docker-swarm-updater-<version>-<platform>`
+# The release of docker-swarm-updater (docs/design.md section 7), made by each push to main
+# unless a newer push supersedes it before it starts. For linux-x86_64 and linux-arm64: the static
+# binary `docker-swarm-updater-<version>-<platform>`
 # and its container image `docker-swarm-updater-<version>-<platform>.image.tar` (an OCI image
 # layout, FROM scratch, the binary alone; crates/xtask/src/release/image.rs), each with its own
 # provenance attestation bundle `<file>.sigstore.json`, and one SHA256SUMS over the four files.
@@ -65,7 +66,7 @@ jobs:
       - run: rustup toolchain install
       - name: The release version
         id: version
-        run: cargo xtask release version --commit-count "$(git rev-list --count "$COMMIT")" | tee -a "$GITHUB_OUTPUT"
+        run: cargo xtask release version --commit-count "$(git rev-list --count "$COMMIT")" --github-output "$GITHUB_OUTPUT"
 
   build:
     name: build ${{ matrix.platform }}
@@ -79,36 +80,61 @@ jobs:
       matrix:
         # Each platform builds natively on a hosted runner of its architecture, so every check
         # below runs the binary and the image on the kind of host they are for.
+        # musl's C toolchain (musl-gcc and the musl headers and libraries) comes from Ubuntu
+        # 24.04's own packages, fetched by URL and checked by SHA-256 before it is installed.
         include:
           - platform: linux-x86_64
             runner: ubuntu-24.04
             target: x86_64-unknown-linux-musl
             oci-platform: linux/amd64
             musl-cc: x86_64-linux-musl-gcc
+            deb-arch: amd64
+            musl-sha256: 9f0883c20b4b746e05e947bafd99cb933f5494ffaaa6fcd360cbe1fbcf264883
+            musl-dev-sha256: 4b451ecb6a0f8469883058cf22a807f3bd9cc16d115cc08b7efc35fe8eb44db2
+            musl-tools-sha256: 46c01d212d3eb3a1322693089037f0a5c92383a089d39c392db3c86c19ffb229
           - platform: linux-arm64
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             oci-platform: linux/arm64
             musl-cc: aarch64-linux-musl-gcc
+            deb-arch: arm64
+            musl-sha256: 79a04df7e8f54c74720ad474c04966204c03370654f4a43bec2968e80821e39f
+            musl-dev-sha256: 56e4fa8e6fcd2825ca9e262e8807d2038d4a0e91274bd51fce1653b219f5ae92
+            musl-tools-sha256: 0ecd1f97fd8cf6727d492c6a7515e44a5a905f5af123fc90f35f954cabc50d60
     env:
       VERSION: ${{ needs.plan.outputs.version }}
       PLATFORM: ${{ matrix.platform }}
       TARGET: ${{ matrix.target }}
       OCI_PLATFORM: ${{ matrix.oci-platform }}
       MUSL_CC: ${{ matrix.musl-cc }}
+      DEB_ARCH: ${{ matrix.deb-arch }}
+      MUSL_VERSION: 1.2.4-2
+      DEBS: https://launchpad.net/ubuntu/+archive/primary/+files
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.COMMIT }}
           persist-credentials: false
-      - name: Install musl-tools
-        run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends musl-tools
+      - run: rustup toolchain install
+      - run: rustup target add "$TARGET"
+      - name: Fetch musl
+        env:
+          SHA256: ${{ matrix.musl-sha256 }}
+        run: cargo xtask fetch --url "$DEBS/musl_${MUSL_VERSION}_$DEB_ARCH.deb" --sha256 "$SHA256" --out "$RUNNER_TEMP/musl.deb"
+      - name: Fetch musl-dev
+        env:
+          SHA256: ${{ matrix.musl-dev-sha256 }}
+        run: cargo xtask fetch --url "$DEBS/musl-dev_${MUSL_VERSION}_$DEB_ARCH.deb" --sha256 "$SHA256" --out "$RUNNER_TEMP/musl-dev.deb"
+      - name: Fetch musl-tools
+        env:
+          SHA256: ${{ matrix.musl-tools-sha256 }}
+        run: cargo xtask fetch --url "$DEBS/musl-tools_${MUSL_VERSION}_$DEB_ARCH.deb" --sha256 "$SHA256" --out "$RUNNER_TEMP/musl-tools.deb"
+      - name: Install musl
+        run: sudo dpkg --install "$RUNNER_TEMP/musl.deb" "$RUNNER_TEMP/musl-dev.deb" "$RUNNER_TEMP/musl-tools.deb"
       # aws-lc-sys compiles C for the musl target with the compiler named after the target's
       # triple; musl-tools installs it as `musl-gcc` only.
       - name: Name musl-gcc as the target's C compiler
         run: sudo ln -s /usr/bin/musl-gcc "/usr/local/bin/$MUSL_CC"
-      - run: rustup toolchain install
-      - run: rustup target add "$TARGET"
       # The release version goes into this checkout only (Cargo.toml and Cargo.lock), so the
       # binary prints it; the repository keeps its own version.
       - name: Stamp the release version
@@ -118,9 +144,9 @@ jobs:
       - name: The binary is static
         run: cargo xtask release check-static --binary "target/$TARGET/release/docker-swarm-updater"
       - name: The binary prints the release version
-        run: test "$("target/$TARGET/release/docker-swarm-updater" --version)" = "docker-swarm-updater $VERSION"
+        run: '"target/$TARGET/release/docker-swarm-updater" --version | grep --fixed-strings --line-regexp "docker-swarm-updater $VERSION"'
       - name: Keep the first build of the binary
-        run: mkdir dist && cp "target/$TARGET/release/docker-swarm-updater" "dist/docker-swarm-updater-$VERSION-$PLATFORM"
+        run: install -D --mode 0755 "target/$TARGET/release/docker-swarm-updater" "dist/docker-swarm-updater-$VERSION-$PLATFORM"
       - name: Remove the build of the workspace's own crates
         run: cargo clean --release --target "$TARGET" -p docker-swarm-updater -p dsu-server -p dsu-core -p dsu-verify -p dsu-docker -p dsu-registry
       - name: Build the static binary again
@@ -129,7 +155,7 @@ jobs:
         run: cmp "dist/docker-swarm-updater-$VERSION-$PLATFORM" "target/$TARGET/release/docker-swarm-updater"
       - name: The commit's time, the one time the image holds
         id: created
-        run: echo "seconds=$(git log -1 --format=%ct "$COMMIT")" >> "$GITHUB_OUTPUT"
+        run: git log -1 --format=seconds=%ct "$COMMIT" >> "$GITHUB_OUTPUT"
       - name: Write the image, 1 of 2
         env:
           CREATED: ${{ steps.created.outputs.seconds }}
@@ -143,7 +169,7 @@ jobs:
       - name: Load the image
         run: docker load --input "$RUNNER_TEMP/image-1.tar"
       - name: The image's entrypoint prints the release version
-        run: test "$(docker run --rm --network none "docker-swarm-updater:$VERSION" --version)" = "docker-swarm-updater $VERSION"
+        run: docker run --rm --network none "docker-swarm-updater:$VERSION" --version | grep --fixed-strings --line-regexp "docker-swarm-updater $VERSION"
       - name: Name the image
         run: cp "$RUNNER_TEMP/image-1.tar" "dist/docker-swarm-updater-$VERSION-$PLATFORM.image.tar"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -178,7 +204,7 @@ jobs:
           path: dist
       - name: Write SHA256SUMS over exactly the release's files
         id: sums
-        run: cargo xtask release sums --dir dist --version "$VERSION" | tee -a "$GITHUB_OUTPUT"
+        run: cargo xtask release sums --dir dist --version "$VERSION" --github-output "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-assets

@@ -29,9 +29,9 @@ No setting is read from the environment.
 
 ## Releases
 
-Every push to `main` makes a release, `v<major>.<minor>.<commits on main>`, built and signed by
-[`.github/workflows/artifacts.yml`](.github/workflows/artifacts.yml). For `linux-x86_64` and
-`linux-arm64` it holds:
+Each push to `main` makes a release, `v<major>.<minor>.<commits on main>`, built and signed by
+[`.github/workflows/artifacts.yml`](.github/workflows/artifacts.yml), unless a newer push
+supersedes it before its run starts. For `linux-x86_64` and `linux-arm64` it holds:
 
 | file | what it is |
 |---|---|

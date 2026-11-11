@@ -74,12 +74,51 @@ pub struct Cli {
     pub wait_minutes: u32,
 }
 
+/// Why `--endpoint` was refused.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum EndpointError {
+    /// The text is not a URL.
+    #[error("{text:?}: {reason}")]
+    NotAUrl {
+        /// The flag's value.
+        text: String,
+        /// The URL parser's error.
+        reason: String,
+    },
+    /// The scheme is neither `http` nor `https`.
+    #[error("{text:?}: the scheme must be http or https")]
+    Scheme {
+        /// The flag's value.
+        text: String,
+    },
+    /// The URL has a user, a path, a query or a fragment.
+    #[error("{text:?}: give the scheme, host and port only (no user, path, query or fragment)")]
+    NotBare {
+        /// The flag's value.
+        text: String,
+    },
+}
+
+/// Why the flags do not make a deploy request.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PlanError {
+    /// The updater's own request parser refuses the request (only `--version` can make it
+    /// refuse: over 128 bytes, or a control character).
+    #[error("--version: {0}")]
+    Version(String),
+}
+
 /// Parses `--endpoint`: `http` or `https`, a host, an optional port, and nothing else.
 /// Returns it without a trailing slash.
-pub fn parse_endpoint(text: &str) -> Result<String, String> {
-    let url = url::Url::parse(text).map_err(|e| format!("{text:?}: {e}"))?;
+pub fn parse_endpoint(text: &str) -> Result<String, EndpointError> {
+    let url = url::Url::parse(text).map_err(|e| EndpointError::NotAUrl {
+        text: text.to_owned(),
+        reason: e.to_string(),
+    })?;
     if !matches!(url.scheme(), "http" | "https") {
-        return Err(format!("{text:?}: the scheme must be http or https"));
+        return Err(EndpointError::Scheme {
+            text: text.to_owned(),
+        });
     }
     let bare = url.username().is_empty()
         && url.password().is_none()
@@ -87,9 +126,9 @@ pub fn parse_endpoint(text: &str) -> Result<String, String> {
         && url.fragment().is_none()
         && url.path() == "/";
     if !bare {
-        return Err(format!(
-            "{text:?}: give the scheme, host and port only (no user, path, query or fragment)"
-        ));
+        return Err(EndpointError::NotBare {
+            text: text.to_owned(),
+        });
     }
     Ok(url.as_str().trim_end_matches('/').to_owned())
 }
@@ -97,7 +136,7 @@ pub fn parse_endpoint(text: &str) -> Result<String, String> {
 impl Cli {
     /// The plan of the run, with `bearer` as the token request's bearer. A `version` the
     /// updater would refuse (over 128 bytes, a control character) is refused here.
-    pub fn plan(self, bearer: String) -> Result<Plan, String> {
+    pub fn plan(self, bearer: String) -> Result<Plan, PlanError> {
         let request = DeployRequest {
             image_digest: self.image_digest,
             image_url: self.image_url,
@@ -113,7 +152,8 @@ impl Cli {
         // The updater's own parser, so a request it would refuse as 400 is refused before
         // anything is sent.
         let text = serde_json::to_vec(&request).unwrap_or_default();
-        let request = DeployRequest::from_json(&text).map_err(|e| e.detail().to_owned())?;
+        let request = DeployRequest::from_json(&text)
+            .map_err(|e| PlanError::Version(e.detail().to_owned()))?;
         Ok(Plan {
             endpoint: self.endpoint,
             service: self.service,
@@ -196,7 +236,7 @@ pub fn run(
     let plan = match cli.plan(bearer) {
         Ok(plan) => plan,
         Err(e) => {
-            let _ = writeln!(out, "::error::--version: {e}");
+            let _ = writeln!(out, "::error::{e}");
             return ExitCode::from(2);
         }
     };

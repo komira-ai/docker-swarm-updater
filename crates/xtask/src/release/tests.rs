@@ -1,7 +1,5 @@
 //! Tests of `release version`, `stamp`, `check-static` and `sums`.
 
-use std::os::unix::fs::PermissionsExt as _;
-
 use super::*;
 
 fn s(v: &[&str]) -> Vec<String> {
@@ -149,17 +147,64 @@ fn stamp_refuses_a_bad_version_or_a_workspace_it_cannot_stamp() {
 }
 
 #[test]
-fn stamp_reports_a_file_it_cannot_write() {
-    for name in ["Cargo.toml", "Cargo.lock"] {
-        let dir = workspace(MANIFEST, LOCK);
-        let path = dir.path().join(name);
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
-        let error = run(&root_args(&["stamp", "--version", "0.1.1"], dir.path())).unwrap_err();
-        assert!(
-            error.starts_with(&format!("writing {}", path.display())),
-            "{error}"
-        );
-    }
+fn a_file_that_cannot_be_written_is_an_error_naming_it() {
+    // A directory where the file should be: refused whatever the account.
+    let dir = tempfile::tempdir().unwrap();
+    let error = write_file(dir.path(), b"x").unwrap_err();
+    assert!(
+        error.starts_with(&format!("writing {}: ", dir.path().display())),
+        "{error}"
+    );
+    let path = dir.path().to_string_lossy().into_owned();
+    let flags: BTreeMap<&str, &str> = [("--github-output", path.as_str())].into();
+    assert!(
+        output(&flags, "k=v\n")
+            .unwrap_err()
+            .starts_with(&format!("writing {path}: "))
+    );
+}
+
+#[test]
+fn github_output_gets_the_printed_line_appended() {
+    let dir = workspace(MANIFEST, LOCK);
+    let out = dir.path().join("github-output");
+    std::fs::write(&out, "earlier=1\n").unwrap();
+    let mut args = root_args(&["version", "--commit-count", "7"], dir.path());
+    args.extend(s(&["--github-output", &out.to_string_lossy()]));
+    let report = run(&args).unwrap();
+    assert_eq!(report.text, "version=0.1.7\n");
+    assert_eq!(
+        std::fs::read_to_string(&out).unwrap(),
+        "earlier=1\nversion=0.1.7\n"
+    );
+
+    let release = release_dir("1.2.3");
+    let sums_out = dir.path().join("sums-output");
+    let args = s(&[
+        "sums",
+        "--dir",
+        &release.path().to_string_lossy(),
+        "--version",
+        "1.2.3",
+        "--github-output",
+        &sums_out.to_string_lossy(),
+    ]);
+    let report = run(&args).unwrap();
+    assert_eq!(std::fs::read_to_string(&sums_out).unwrap(), report.text);
+
+    // A failed check writes no output.
+    let failed_out = dir.path().join("failed-output");
+    let args = s(&[
+        "sums",
+        "--dir",
+        &release.path().to_string_lossy(),
+        "--version",
+        "9.9.9",
+        "--github-output",
+        &failed_out.to_string_lossy(),
+    ]);
+    assert!(!run(&args).unwrap().passed);
+    assert!(!failed_out.exists());
 }
 
 /// An ELF64 little-endian header with `types` as its program headers' types.
@@ -212,9 +257,9 @@ fn a_file_that_is_not_a_whole_elf64_is_refused() {
 }
 
 #[test]
-fn check_static_passes_a_static_binary_and_fails_this_dynamic_test_binary() {
+fn check_static_passes_a_binary_without_an_interpreter_and_fails_one_with() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("bin");
+    let path = dir.path().join("static");
     std::fs::write(&path, elf(&[1])).unwrap();
     let report = run(&s(&["check-static", "--binary", &path.to_string_lossy()])).unwrap();
     assert!(report.passed);
@@ -223,22 +268,32 @@ fn check_static_passes_a_static_binary_and_fails_this_dynamic_test_binary() {
         format!("check-static: {} is static\n", path.display())
     );
 
-    // The test binary itself is linked against the host's libc, so it has an interpreter.
-    let me = std::env::current_exe().unwrap();
-    let report = run(&s(&["check-static", "--binary", &me.to_string_lossy()])).unwrap();
+    let dynamic = dir.path().join("dynamic");
+    std::fs::write(&dynamic, elf(&[6, 3, 1])).unwrap();
+    let report = run(&s(&[
+        "check-static",
+        "--binary",
+        &dynamic.to_string_lossy(),
+    ]))
+    .unwrap();
     assert!(!report.passed);
     assert_eq!(
         report.text,
         format!(
             "check-static: {} needs a program interpreter\n",
-            me.display()
+            dynamic.display()
         )
     );
 
+    let missing = dir.path().join("missing");
     assert!(
-        run(&s(&["check-static", "--binary", "/nonexistent/bin"]))
-            .unwrap_err()
-            .starts_with("reading /nonexistent/bin")
+        run(&s(&[
+            "check-static",
+            "--binary",
+            &missing.to_string_lossy()
+        ]))
+        .unwrap_err()
+        .starts_with(&format!("reading {}", missing.display()))
     );
 }
 
@@ -327,11 +382,19 @@ fn sums_fails_on_a_missing_or_an_extra_file() {
 }
 
 #[test]
-fn sums_reports_what_it_cannot_read_or_write() {
+fn sums_reports_what_it_cannot_read() {
+    let missing = tempfile::tempdir().unwrap();
+    let gone = missing.path().join("missing");
     assert!(
-        run(&s(&["sums", "--dir", "/nonexistent", "--version", "1"]))
-            .unwrap_err()
-            .starts_with("reading /nonexistent")
+        run(&s(&[
+            "sums",
+            "--dir",
+            &gone.to_string_lossy(),
+            "--version",
+            "1"
+        ]))
+        .unwrap_err()
+        .starts_with(&format!("reading {}", gone.display()))
     );
     // An asset name that is a directory cannot be read.
     let dir = release_dir("1.2.3");
@@ -350,19 +413,6 @@ fn sums_reports_what_it_cannot_read_or_write() {
             .unwrap_err()
             .starts_with(&format!("reading {}", name.display()))
     );
-    // A directory SHA256SUMS cannot be written into.
-    let dir = release_dir("1.2.3");
-    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
-    let args = s(&[
-        "sums",
-        "--dir",
-        &dir.path().to_string_lossy(),
-        "--version",
-        "1.2.3",
-    ]);
-    let error = run(&args).unwrap_err();
-    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
-    assert!(error.starts_with("writing "), "{error}");
 }
 
 #[test]

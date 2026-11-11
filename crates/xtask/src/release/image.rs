@@ -25,10 +25,10 @@ use super::{NAME, PLATFORMS, flags, required};
 use crate::Report;
 
 /// Where the binary is in the image, and the image's entrypoint.
-pub const ENTRYPOINT: &str = "/docker-swarm-updater";
+pub(crate) const ENTRYPOINT: &str = "/docker-swarm-updater";
 
 /// The user the image runs as unless the service names one.
-pub const USER: &str = "65532:65532";
+pub(crate) const USER: &str = "65532:65532";
 
 const SOURCE: &str = "https://github.com/komira-ai/docker-swarm-updater";
 const MANIFEST_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
@@ -38,26 +38,26 @@ const INDEX_TYPE: &str = "application/vnd.oci.image.index.v1+json";
 
 /// What one image is made of.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Inputs {
+pub(crate) struct Inputs {
     /// The static binary's bytes.
-    pub binary: Vec<u8>,
+    pub(crate) binary: Vec<u8>,
     /// The release version.
-    pub version: String,
+    pub(crate) version: String,
     /// The commit the release is built from, 40 hex digits.
-    pub commit: String,
+    pub(crate) commit: String,
     /// The commit's time, in seconds since the epoch: every time in the image.
-    pub created: i64,
+    pub(crate) created: i64,
     /// The OCI architecture, `amd64` or `arm64`.
-    pub architecture: String,
+    pub(crate) architecture: String,
 }
 
 /// An image tar and its manifest digest.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Image {
+pub(crate) struct Image {
     /// The tar's bytes.
-    pub tar: Vec<u8>,
+    pub(crate) tar: Vec<u8>,
     /// `sha256:<hex>` of the manifest.
-    pub manifest_digest: String,
+    pub(crate) manifest_digest: String,
 }
 
 pub(crate) fn run(args: &[String]) -> Result<Report, String> {
@@ -110,7 +110,7 @@ pub(crate) fn run(args: &[String]) -> Result<Report, String> {
 }
 
 /// The image of `inputs`.
-pub fn build(inputs: &Inputs) -> Result<Image, String> {
+pub(crate) fn build(inputs: &Inputs) -> Result<Image, String> {
     let created = jiff::Timestamp::from_second(inputs.created)
         .map_err(|e| format!("--created {}: {e}", inputs.created))?;
     let mtime = u64::try_from(inputs.created)

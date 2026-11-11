@@ -283,6 +283,20 @@ fn a_bad_command_line_or_input_exits_2() {
     std::fs::write(&binary, BINARY).unwrap();
     let binary = binary.to_string_lossy().into_owned();
     let out = dir.path().join("o.tar").to_string_lossy().into_owned();
+    let missing_binary = dir.path().join("missing").to_string_lossy().into_owned();
+    let missing_out = dir
+        .path()
+        .join("missing/o.tar")
+        .to_string_lossy()
+        .into_owned();
+    let reading_missing = format!("reading {missing_binary}");
+    let writing_missing = format!("writing {missing_out}");
+    let missing_binary = dir.path().join("missing").to_string_lossy().into_owned();
+    let missing_out = dir
+        .path()
+        .join("missing/o.tar")
+        .to_string_lossy()
+        .into_owned();
     let base = [
         ("--binary", binary.as_str()),
         ("--version", "1"),
@@ -323,16 +337,8 @@ fn a_bad_command_line_or_input_exits_2() {
             "darwin/arm64",
             "is not linux/amd64 or linux/arm64",
         ),
-        (
-            "--binary",
-            "/nonexistent/binary",
-            "reading /nonexistent/binary",
-        ),
-        (
-            "--out",
-            "/nonexistent/dir/o.tar",
-            "writing /nonexistent/dir/o.tar",
-        ),
+        ("--binary", &missing_binary, &reading_missing),
+        ("--out", &missing_out, &writing_missing),
     ];
     for (flag, value, message) in cases {
         let mut args = vec!["release", "image"];
