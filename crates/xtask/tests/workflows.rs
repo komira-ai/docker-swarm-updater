@@ -53,6 +53,21 @@ fn get<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
     Some(&value[key]).filter(|v| !v.is_badvalue())
 }
 
+/// Whether `a` and `b` are the same YAML value, the entries of a mapping in any order.
+fn same(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Hash(a), Value::Hash(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .all(|(k, v)| b.get(k).is_some_and(|other| same(v, other)))
+        }
+        (Value::Array(a), Value::Array(b)) => {
+            a.len() == b.len() && a.iter().zip(b).all(|(a, b)| same(a, b))
+        }
+        _ => a == b,
+    }
+}
+
 fn steps(job: &Value) -> &[Value] {
     job["steps"].as_vec().map_or(&[], Vec::as_slice)
 }
@@ -89,7 +104,7 @@ fn common_violations(name: &str, workflow: &Value) -> Vec<String> {
 /// The boundaries of artifacts.yml.
 fn violations(artifacts: &Value) -> Vec<String> {
     let mut out = common_violations("artifacts.yml", artifacts);
-    if artifacts["on"] != yaml("push: {branches: [main]}") {
+    if !same(&artifacts["on"], &yaml("push: {branches: [main]}")) {
         out.push("artifacts.yml: it runs on more than a push to main".into());
     }
     let jobs = artifacts["jobs"].as_hash().cloned().unwrap_or_default();
@@ -102,7 +117,7 @@ fn violations(artifacts: &Value) -> Vec<String> {
     }
     for (name, permissions) in ARTIFACTS_JOBS {
         let job = &artifacts["jobs"][name];
-        if get(job, "permissions") != Some(&yaml(permissions)) {
+        if !get(job, "permissions").is_some_and(|p| same(p, &yaml(permissions))) {
             out.push(format!(
                 "artifacts.yml: job {name} does not hold exactly {permissions}"
             ));
@@ -173,6 +188,38 @@ fn broken(edit: impl Fn(&str) -> String) -> Value {
     let changed = edit(&text);
     assert_ne!(changed, text, "the edit changed nothing");
     yaml(&changed)
+}
+
+#[test]
+fn mappings_compare_in_any_key_order() {
+    let cases = [
+        ("{a: 1, b: 2}", "{b: 2, a: 1}", true),
+        ("{a: {x: 1, y: 2}}", "{a: {y: 2, x: 1}}", true),
+        ("{a: 1, b: 2}", "{a: 1}", false),
+        ("{a: 1, b: 2}", "{a: 1, c: 2}", false),
+        ("{a: 1, b: 2}", "{a: 1, b: 3}", false),
+        ("[a, b]", "[b, a]", false),
+        ("[a, b]", "[a]", false),
+        ("[{a: 1, b: 2}]", "[{b: 2, a: 1}]", true),
+        ("a", "a", true),
+        ("a", "{a: 1}", false),
+    ];
+    for (a, b, expected) in cases {
+        assert_eq!(same(&yaml(a), &yaml(b)), expected, "{a} vs {b}");
+    }
+}
+
+/// A job's permissions written in another key order hold the same boundary.
+#[test]
+fn reordered_permissions_hold_the_boundary() {
+    let reordered = broken(|t| {
+        t.replacen(
+            "      contents: read\n      id-token: write\n      attestations: write\n",
+            "      attestations: write\n      contents: read\n      id-token: write\n",
+            1,
+        )
+    });
+    assert_eq!(violations(&reordered), Vec::<String>::new());
 }
 
 #[test]
