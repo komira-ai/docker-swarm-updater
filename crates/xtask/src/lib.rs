@@ -1,8 +1,13 @@
-//! Repository checks. `cargo xtask coverage --lcov <file> [--root <dir>] [--summary <file>]`
+//! Repository checks and CI helpers: `cargo xtask layers` (see [`layers`]), `cargo xtask
+//! fetch` (pinned tool downloads, see the `fetch` module) and `cargo xtask coverage --lcov <file> [--root <dir>] [--summary <file>]`
 //! reads an lcov report made with branch coverage and holds every workspace crate to the
 //! floors in its own `Cargo.toml` (`[package.metadata.coverage]`, `lines` and `branches`,
 //! percent). A floor below 99, a crate without floors, a crate with nothing measured, or a
 //! crate under its floors fails the check.
+
+pub mod layers;
+
+mod fetch;
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -13,7 +18,8 @@ use std::process::ExitCode;
 const MIN_FLOOR: f64 = 99.0;
 
 /// Runs the command line `args` (without the program name) and returns the exit code: 0 when
-/// every crate meets its floors, 1 when one does not, 2 when the command line or an input is wrong.
+/// the check passes (every crate meets its floors, the layers hold, the file is fetched), 1
+/// when it does not, 2 when the command line or an input is wrong.
 pub fn main(args: impl Iterator<Item = String>) -> ExitCode {
     let args: Vec<String> = args.collect();
     match run(&args) {
@@ -50,7 +56,7 @@ struct Options {
 fn parse_args(args: &[String]) -> Result<Options, String> {
     let mut it = args.iter();
     if it.next().map(String::as_str) != Some("coverage") {
-        return Err("usage: xtask coverage --lcov <file> [--root <dir>] [--summary <file>]".into());
+        return Err("usage: xtask coverage --lcov <file> [--root <dir>] [--summary <file>] | layers [--root <dir>] | fetch ...".into());
     }
     let (mut lcov, mut root, mut summary) = (None, PathBuf::from("."), None);
     while let Some(flag) = it.next() {
@@ -71,6 +77,14 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
 }
 
 fn run(args: &[String]) -> Result<Report, String> {
+    match args.first().map(String::as_str) {
+        Some("layers") => layers::run(&args[1..]),
+        Some("fetch") => fetch::run(&args[1..]),
+        _ => coverage(args),
+    }
+}
+
+fn coverage(args: &[String]) -> Result<Report, String> {
     let opts = parse_args(args)?;
     let lcov = std::fs::read_to_string(&opts.lcov)
         .map_err(|e| format!("reading {}: {e}", opts.lcov.display()))?;

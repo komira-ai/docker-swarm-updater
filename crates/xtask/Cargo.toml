@@ -1,6 +1,6 @@
 [package]
 name = "xtask"
-description = "Repository checks: the per-crate coverage floors"
+description = "Repository checks and CI tool fetching: coverage floors, layers, pinned downloads"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -19,6 +19,15 @@ branches = 99.0
 [dependencies]
 serde.workspace = true
 toml.workspace = true
+ureq.workspace = true
+flate2.workspace = true
+tar.workspace = true
+sha2.workspace = true
+hex.workspace = true
+url.workspace = true
+rustls.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+rcgen.workspace = true
+rustls-pki-types.workspace = true
