@@ -110,3 +110,31 @@ fn fetch_with_a_bad_command_line_or_no_url_that_serves_the_file_exits_2() {
          fetch: not a url: attempt 1 of 3: not a url: relative URL without a base\n\n"
     );
 }
+
+#[test]
+fn fetch_reuse_keeps_a_pinned_file_without_downloading_and_exits_0() {
+    use sha2::{Digest as _, Sha256};
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("f.deb");
+    std::fs::write(&out, b"pinned bytes").unwrap();
+    let hex = hex::encode(Sha256::digest(b"pinned bytes"));
+    let out_arg = out.to_string_lossy().into_owned();
+    // The URL is refused on download (not https): exit 0 shows nothing was downloaded.
+    let run = xtask(&[
+        "fetch",
+        "--reuse",
+        "--url",
+        "http://127.0.0.1:1/x",
+        "--sha256",
+        &hex,
+        "--out",
+        &out_arg,
+    ]);
+    assert_eq!(run.status.code(), Some(0), "{run:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&run.stdout),
+        format!("fetch: kept {out_arg}, its sha256 is the pinned one\n")
+    );
+    assert_eq!(String::from_utf8_lossy(&run.stderr), "");
+    assert_eq!(std::fs::read(&out).unwrap(), b"pinned bytes");
+}
