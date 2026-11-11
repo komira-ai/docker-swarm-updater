@@ -86,17 +86,27 @@ fn layers_fails_with_exit_1_on_a_defect_and_2_on_bad_input() {
 }
 
 #[test]
-fn fetch_with_a_bad_command_line_or_an_unreachable_host_exits_2() {
+fn fetch_with_a_bad_command_line_or_no_url_that_serves_the_file_exits_2() {
     assert_eq!(xtask(&["fetch"]).status.code(), Some(2));
     let hex = "0".repeat(64);
+    // Both URLs are refused before any connection (a transient failure would pause the test
+    // for real between attempts).
     let out = xtask(&[
         "fetch",
         "--url",
-        "https://127.0.0.1:1/x",
+        "http://127.0.0.1:1/x",
+        "--url",
+        "not a url",
         "--sha256",
         &hex,
         "--out",
         "unused",
     ]);
     assert_eq!(out.status.code(), Some(2));
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "xtask: no URL served unused:\n\
+         fetch: http://127.0.0.1:1/x: attempt 1 of 3: http://127.0.0.1:1/x: only https URLs are fetched\n\
+         fetch: not a url: attempt 1 of 3: not a url: relative URL without a base\n\n"
+    );
 }
