@@ -606,7 +606,7 @@ fn trusted_roots_that_cannot_be_used_are_refused() {
 
     // a key window that ends before it starts
     let mut value: Value = serde_json::from_str(&good).unwrap();
-    value["tlogs"][0]["publicKey"]["validFor"]["end"] = json!("2026-01-01T00:00:00Z");
+    value["tlogs"][0]["publicKey"]["validFor"]["end"] = json!("2026-09-02T00:00:00Z");
     let error = TrustedRoots::parse(format!("{good}\n{value}").as_bytes()).unwrap_err();
     match &error {
         RootError::Unusable { index: 2, detail } => {
@@ -795,7 +795,18 @@ mod real_bundles {
         let roots = roots();
         assert!(format!("{roots:?}").contains("roots: 2"));
         // GitHub's own instance has the newest key; it has no announced end
-        let from: jiff::Timestamp = "2026-06-12T00:00:00Z".parse().unwrap();
+        let github: Value =
+            serde_json::from_slice(ROOTS.split(|b| *b == b'\n').nth(1).unwrap()).unwrap();
+        let from = github["certificateAuthorities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|authority| {
+                let start = authority["validFor"]["start"].as_str().unwrap();
+                start.parse::<jiff::Timestamp>().unwrap()
+            })
+            .max()
+            .unwrap();
         assert_eq!(roots.newest_key(), Some(KeyValidity { from, until: None }));
     }
 
