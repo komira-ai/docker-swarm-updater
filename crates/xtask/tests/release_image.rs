@@ -359,3 +359,61 @@ fn a_bad_command_line_or_input_exits_2() {
         "xtask: --out is required\n"
     );
 }
+
+/// What `release deploy-inputs` reads from the release's linux-x86_64 image is the digest
+/// `release image` wrote it with, and the updater verifies that image under that digest.
+#[test]
+fn the_deploy_inputs_name_the_digest_the_updater_verifies() {
+    let dir = tempfile::tempdir().unwrap();
+    let name = "docker-swarm-updater-0.1.42-linux-x86_64.image.tar";
+    let written = image(dir.path(), name, "linux/amd64", CREATED);
+    let output = xtask(&[
+        "release",
+        "deploy-inputs",
+        "--dir",
+        &dir.path().to_string_lossy(),
+        "--repo",
+        "komira-ai/docker-swarm-updater",
+        "--version",
+        "0.1.42",
+    ]);
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let url = format!(
+        "https://github.com/komira-ai/docker-swarm-updater/releases/download/v0.1.42/{name}"
+    );
+    assert_eq!(
+        stdout,
+        format!("digest={written}\nimage-url={url}\nbundle-url={url}.sigstore.json\n")
+    );
+    let sent = stdout
+        .lines()
+        .next()
+        .unwrap()
+        .strip_prefix("digest=")
+        .unwrap();
+    let sent = Digest::parse(sent).unwrap();
+    let verified = verify(&dir.path().join(name), name, &sent, "linux/amd64").unwrap();
+    assert_eq!(verified.image.manifest_digest, written);
+
+    // No image of that version in the directory: exit 2, naming the file.
+    let output = xtask(&[
+        "release",
+        "deploy-inputs",
+        "--dir",
+        &dir.path().to_string_lossy(),
+        "--repo",
+        "komira-ai/docker-swarm-updater",
+        "--version",
+        "0.1.43",
+    ]);
+    assert_eq!(output.status.code(), Some(2));
+    let missing = dir
+        .path()
+        .join("docker-swarm-updater-0.1.43-linux-x86_64.image.tar");
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .starts_with(&format!("xtask: reading {}: ", missing.display()))
+    );
+}

@@ -456,6 +456,14 @@ after the hand-off for restarts, the size and free-space limits). A new error to
   `id-token: write` and `attestations: write`, and runs no repository code; each binary and image gets its own `.sigstore.json`, which
   `verify` checks against this signer before `publish` creates the release. `artifacts.yml` is the signer identity, so it is never
   renamed.
+- **The release deploys itself.** After `publish`, and only while the repository variable `CP_DEPLOY_ENDPOINT` is not empty,
+  `deploy-digest` (`contents: read`) downloads the release's `SHA256SUMS` and linux-x86_64 image, holds them to the sums the run made,
+  and outputs the manifest digest of the image's `index.json` and the release's addresses of the image and its bundle (`cargo xtask
+  release deploy-inputs`); then `deploy` calls the reusable workflow below, pinned to the commit the updater's allow-list names for
+  `job_workflow_ref`, for the service `docker-swarm-updater` in the environment `controlplane`, with the default signer. `deploy`
+  holds `id-token: write` and nothing else; a token minted there cannot sign a release, because its certificate names `deploy.yml`,
+  not `artifacts.yml`, as the signer workflow, and the job has no `attestations: write`. The deploy is a self-update (section 3.6).
+  With the variable unset or empty both jobs are skipped.
 - **The reusable workflow** `.github/workflows/deploy.yml` (`on: workflow_call`). Inputs: `service`, `version`, `image-digest`,
   `image-url`, `bundle-url`, `signer-repository`, `signer-workflow`, `signer-ref` (the last three default to the caller's repository,
   `.github/workflows/artifacts.yml` and `refs/heads/main`), `endpoint`, `audience`, `environment`, `wait-minutes` (default 60),
