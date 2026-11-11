@@ -28,8 +28,9 @@
 # workflow there), not on a `release` event, because the token's `ref` claim is the triggering
 # ref.
 #
-# Steps: an optional join of a Tailscale network (when `tailscale-oauth-client-id` is set),
-# then the deploy client `dsu-deploy` (crates/dsu-deploy), built from this workflow's own
+# Steps: an optional join of a Tailscale network (when `tailscale-oauth-client-id` is set; the
+# job then fails first, in a step whose name names the input, when `tailscale-audience` or
+# `tailscale-tags` is empty), then the deploy client `dsu-deploy` (crates/dsu-deploy), built from this workflow's own
 # commit (`job.workflow_repository` at `job.workflow_sha`), so a caller pinned to a commit runs
 # exactly that commit's client. It asks GitHub for a new OIDC token with `audience` for every
 # request, sends Deploy, then Status every 10 s until a final state or `wait-minutes` (0: no
@@ -120,6 +121,16 @@ jobs:
       # Without them the checkout below would take the caller's repository instead.
       - name: Refuse a runner that does not set job.workflow_repository and job.workflow_sha
         if: ${{ job.workflow_repository == '' || job.workflow_sha == '' }}
+        run: exit 1
+      # Tailscale's workload identity needs the client id, its audience and the node's tags
+      # together; with the client id set and either of the others empty, the job stops here,
+      # the failed step's name naming the empty input, before the join would fail without
+      # naming it.
+      - name: Refuse a tailnet join with tailscale-oauth-client-id set and tailscale-audience empty
+        if: ${{ inputs.tailscale-oauth-client-id != '' && inputs.tailscale-audience == '' }}
+        run: exit 1
+      - name: Refuse a tailnet join with tailscale-oauth-client-id set and tailscale-tags empty
+        if: ${{ inputs.tailscale-oauth-client-id != '' && inputs.tailscale-tags == '' }}
         run: exit 1
       # Tailscale is fetched by version and checked against its SHA-256 (linux amd64, the
       # runner above), never taken from a cache.

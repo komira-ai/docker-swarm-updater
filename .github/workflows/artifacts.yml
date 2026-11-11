@@ -29,9 +29,9 @@
 # `contents: write`) creates the release.
 #
 # Then the release deploys itself to the control plane (the service `docker-swarm-updater`),
-# only while the repository variable CP_DEPLOY_ENDPOINT is not empty: with it unset or empty,
-# `deploy-digest` and `deploy` are skipped and the run ends at `publish`. See the comment above
-# the two jobs. `deploy` holds `id-token: write` alone and cannot sign.
+# only while the repository variables CP_DEPLOY_ENDPOINT and CP_DEPLOY_TAILSCALE_TAGS are not
+# empty: with either unset or empty, `deploy-digest` and `deploy` are skipped and the run ends
+# at `publish`. See the comment above the two jobs. `deploy` holds `id-token: write` alone and cannot sign.
 name: artifacts
 
 on:
@@ -361,9 +361,10 @@ jobs:
 
   # deploy-digest and deploy: this release deployed to the service `docker-swarm-updater` on the
   # control plane's Docker Swarm, through the updater itself (docs/design.md section 3.6,
-  # self-update). Both run only for a push to main and only while the repository variable
-  # CP_DEPLOY_ENDPOINT is not empty. The workflow lint (crates/xtask/tests/workflows.rs) holds
-  # them to this shape.
+  # self-update). Both run only for a push to main and only while the repository variables
+  # CP_DEPLOY_ENDPOINT and CP_DEPLOY_TAILSCALE_TAGS are not empty (the deploy front is reached
+  # through the tailnet, and a join without tags fails). The workflow lint
+  # (crates/xtask/tests/workflows.rs) holds them to this shape.
   #
   # deploy-digest  reads the published release (`contents: read`): it downloads SHA256SUMS and
   #          the linux-x86_64 image, refuses sums other than the ones `sums` made and an image
@@ -386,7 +387,7 @@ jobs:
   #          waits (the `artifacts` concurrency group), so releases deploy in push order.
   deploy-digest:
     needs: [plan, sums, publish]
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.CP_DEPLOY_ENDPOINT != '' }}
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.CP_DEPLOY_ENDPOINT != '' && vars.CP_DEPLOY_TAILSCALE_TAGS != '' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -423,7 +424,7 @@ jobs:
 
   deploy:
     needs: [plan, deploy-digest]
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.CP_DEPLOY_ENDPOINT != '' }}
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.CP_DEPLOY_ENDPOINT != '' && vars.CP_DEPLOY_TAILSCALE_TAGS != '' }}
     permissions:
       id-token: write
     uses: komira-ai/docker-swarm-updater/.github/workflows/deploy.yml@c1fcc47610e2886d4d9e561be3c0c76f0452d1f6 # v0.1.3
