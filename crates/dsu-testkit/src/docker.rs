@@ -1,6 +1,7 @@
 //! A fake Docker Engine API on a Unix socket (docs/design.md section 6): services with a
 //! spec, a version, an update status, a previous spec and tasks; a script saying how the
-//! next update goes; a record of every update body received. Time is set by the test.
+//! next update goes; a record of every update body received. Time is set by the test. As
+//! Swarm, an update that leaves the task template as it was starts no rollout.
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
@@ -33,6 +34,9 @@ pub enum Outcome {
     NeverEnds,
     /// The update is refused with status 500 and this message; the service is unchanged.
     Refuses(String),
+    /// The update is answered 200 and dropped: the spec, the version and the status are
+    /// unchanged.
+    Ignores,
 }
 
 /// How updates go.
@@ -310,6 +314,31 @@ impl FakeDocker {
             .tasks = tasks;
     }
 
+    /// Sets the image of the spec of the service with this name or id (its tasks are set
+    /// with [`FakeDocker::set_tasks`]).
+    pub fn set_image(&self, name_or_id: &str, image: &str) {
+        self.lock()
+            .services
+            .iter_mut()
+            .find(|s| s.is(name_or_id))
+            .unwrap()
+            .spec["TaskTemplate"]["ContainerSpec"]["Image"] = Value::String(image.to_owned());
+    }
+
+    /// Starts an update of the service with this name or id that someone else asked for at
+    /// `started_at`: from the next read it goes as the script says, like an accepted update.
+    pub fn begin_update(&self, name_or_id: &str, started_at: Timestamp) {
+        self.lock()
+            .services
+            .iter_mut()
+            .find(|s| s.is(name_or_id))
+            .unwrap()
+            .pending = Some(Pending {
+            started_at,
+            reads: 0,
+        });
+    }
+
     /// Sets the status of the service with this name or id.
     pub fn set_update_status(&self, name_or_id: &str, status: FakeUpdateStatus) {
         self.lock()
@@ -456,7 +485,7 @@ fn advance(service: &mut FakeService, script: &UpdateScript, reads: u32, started
             );
             service.pending = None;
         }
-        Outcome::NeverEnds | Outcome::Refuses(_) => {}
+        Outcome::NeverEnds | Outcome::Refuses(_) | Outcome::Ignores => {}
     }
 }
 
@@ -493,12 +522,20 @@ fn update(state: &mut State, key: &str, query: &str, body: &[u8]) -> Response<Fu
     if version != service.index {
         return message(500, "update out of sequence");
     }
+    if state.script.outcome == Outcome::Ignores {
+        return reply(200, &json!({"Warnings": null}));
+    }
+    // As Swarm: a spec whose task template is unchanged (only service labels differ) is
+    // stored, but no rollout starts and the status stays what it was.
+    let rolls_out = new_spec.get("TaskTemplate") != service.spec.get("TaskTemplate");
     service.previous_spec = Some(std::mem::replace(&mut service.spec, new_spec));
     service.index += 1;
-    service.pending = Some(Pending {
-        started_at: state.now,
-        reads: 0,
-    });
+    if rolls_out {
+        service.pending = Some(Pending {
+            started_at: state.now,
+            reads: 0,
+        });
+    }
     reply(200, &json!({"Warnings": null}))
 }
 

@@ -7,7 +7,9 @@
 //!   floor ([`crate::pipeline::verify_tar`]);
 //! - pushing: the blobs and the manifest to the registry, by digest;
 //! - updating: the Swarm service's spec with its image and two labels changed (a
-//!   self-update writes phase `handed_off` here instead of `updating`);
+//!   self-update writes phase `handed_off` here instead of `updating`); when Swarm already
+//!   runs the image (the spec names it, every running task runs it, no update in flight) no
+//!   update is asked for and the deploy converges here;
 //! - waiting: polling the service until [`dsu_core::swarm::judge`] settles it.
 //!
 //! The downloaded files are removed as soon as the push is over. A deploy ends `converged`
@@ -304,6 +306,8 @@ struct Run {
     permit: Permit,
     observed: Option<Observation>,
     poll_error: Option<String>,
+    /// Why no update was asked for, when Swarm already ran the image.
+    no_update: Option<String>,
 }
 
 impl Run {
@@ -315,6 +319,7 @@ impl Run {
             permit,
             observed: None,
             poll_error: None,
+            no_update: None,
         }
     }
 
@@ -362,8 +367,10 @@ impl Run {
         // The files are not needed once the push is over, or the deploy failed.
         let _ = tokio::fs::remove_dir_all(&dir).await;
         prepared?;
-        let snapshot = self.update().await?;
-        self.wait(snapshot).await
+        match self.update().await? {
+            Some(snapshot) => self.wait(snapshot).await,
+            None => Ok(()),
+        }
     }
 
     /// Fetches, verifies and pushes the image.
@@ -466,8 +473,11 @@ impl Run {
     }
 
     /// Section 3.5 steps 1 and 2: reads the service, keeps the snapshot in the service state
-    /// and asks Swarm for the update. Returns the snapshot of the read that was accepted.
-    async fn update(&mut self) -> Result<Snapshot, Failure> {
+    /// and asks Swarm for the update. Returns the snapshot of the read that was accepted, or
+    /// `None` when the read shows that Swarm already runs the image: an update would change
+    /// only the labels, Swarm would start no rollout and write no status, so nothing is asked
+    /// for and the deploy has converged.
+    async fn update(&mut self) -> Result<Option<Snapshot>, Failure> {
         let phase = if self.app.deployer.is_self(&self.service.swarm_service) {
             Phase::HandedOff
         } else {
@@ -488,6 +498,32 @@ impl Run {
                 version_index: view.version_index,
                 read_at,
             };
+            let tasks = self
+                .app
+                .docker
+                .running_tasks(&view.id)
+                .await
+                .map_err(Failure::swarm)?;
+            let images: Vec<String> = tasks.iter().map(|t| t.image.clone()).collect();
+            // Judged against the snapshot of this very read, no status can belong to an
+            // update of this deploy: `Converged` means Swarm runs the image already.
+            let verdict = swarm::judge(
+                &snapshot,
+                &core_view(&view),
+                &images,
+                &image,
+                &self.record.id,
+            );
+            self.observed = Some(Observation {
+                view: view.clone(),
+                tasks,
+            });
+            if verdict == Verdict::Converged {
+                self.no_update = Some(format!(
+                    "Swarm already runs {image} on every task; no update asked for"
+                ));
+                return Ok(None);
+            }
             let id = self.record.id.clone();
             self.app
                 .store
@@ -500,7 +536,7 @@ impl Run {
                 .update_service(&view, &image, &self.record.id, &self.record.image_digest)
                 .await;
             match update {
-                Ok(()) => return Ok(snapshot),
+                Ok(()) => return Ok(Some(snapshot)),
                 Err(DockerError::VersionConflict { .. }) if conflicts == 0 => conflicts += 1,
                 Err(error) => return Err(Failure::swarm(error)),
             }
@@ -569,7 +605,8 @@ impl Run {
         }
     }
 
-    /// The task states and errors last seen, and the last failed read, for the last step.
+    /// Why no update was asked for, the task states and errors last seen, and the last
+    /// failed read, for the last step.
     fn observations(&self) -> Vec<String> {
         let tasks = self.observed.iter().map(|seen| {
             let tasks: Vec<String> = seen
@@ -590,7 +627,12 @@ impl Run {
             .poll_error
             .iter()
             .map(|e| format!("the last read of the service failed: {e}"));
-        tasks.chain(failed).collect()
+        self.no_update
+            .iter()
+            .cloned()
+            .chain(tasks)
+            .chain(failed)
+            .collect()
     }
 
     /// Section 3.5 step 4: deletes the manifests the updater pushed that are no longer
