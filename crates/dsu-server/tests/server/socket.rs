@@ -5,7 +5,7 @@ use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _}
 use std::os::unix::net::UnixStream as StdStream;
 
 use dsu_server::cli::{ServeArgs, serve};
-use dsu_server::peer::{PeerCred, SystemPeerCred};
+use dsu_server::peer::{Credentials, PeerCred, SystemPeerCred};
 use dsu_server::server::{Shutdown, bind_socket};
 use dsu_server::startup::StartError;
 use tokio::sync::oneshot;
@@ -102,16 +102,20 @@ async fn socket_failures_name_the_flag() {
 }
 
 #[tokio::test]
-async fn the_peer_uid_is_the_kernels() {
+async fn the_peer_credentials_are_the_kernels() {
     let dir = tempfile::tempdir().unwrap();
     let listener = tokio::net::UnixListener::bind(dir.path().join("s")).unwrap();
     let client = tokio::net::UnixStream::connect(dir.path().join("s"))
         .await
         .unwrap();
     let (server, _) = listener.accept().await.unwrap();
-    let mine = rustix::process::geteuid().as_raw();
-    assert_eq!(SystemPeerCred.uid(&server).unwrap(), mine);
-    assert_eq!(SystemPeerCred.uid(&client).unwrap(), mine);
+    let mine = Credentials {
+        pid: rustix::process::getpid().as_raw_nonzero().get(),
+        uid: rustix::process::geteuid().as_raw(),
+        gid: rustix::process::getegid().as_raw(),
+    };
+    assert_eq!(SystemPeerCred.credentials(&server).unwrap(), mine);
+    assert_eq!(SystemPeerCred.credentials(&client).unwrap(), mine);
 }
 
 #[tokio::test]

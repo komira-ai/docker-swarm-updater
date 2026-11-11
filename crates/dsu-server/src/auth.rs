@@ -4,7 +4,7 @@
 use dsu_core::api::ApiError;
 use dsu_core::claims::Claims;
 use dsu_core::config::ServiceConfig;
-use dsu_core::peer::{Principal, admit};
+use dsu_core::peer::{PeerRefusal, Principal, admit};
 use http::HeaderMap;
 use http::header::HeaderName;
 
@@ -48,24 +48,55 @@ fn claims_text(headers: &HeaderMap) -> Result<&str, ApiError> {
     }
 }
 
-/// Applies the checks of step 1 in order to a request from `peer_uid`: the peer rule
-/// (`bad_peer`, `no_claims`), the claims parse (`bad_request`), `exp` (`expired`) and the
-/// `jti` (`replayed`, spent now). `is_health` requests are accepted from any peer and read no
-/// claims.
+/// The detail of a refusal at the peer rule: which rule the peer broke. uid 0 without claims
+/// is refused only when `--allow-local-operator` is not given.
+fn peer_refusal(refusal: PeerRefusal, peer_uid: u32, has_claims: bool) -> ApiError {
+    match refusal {
+        PeerRefusal::NoClaims => refusal.into(),
+        PeerRefusal::BadPeer => ApiError::BadPeer(match (has_claims, peer_uid) {
+            (true, 0) => "a claims header is never accepted from uid 0".into(),
+            (true, uid) => {
+                format!("a claims header is accepted only from --proxy-uid, not from uid {uid}")
+            }
+            (false, 0) => {
+                "uid 0 is the local operator only when the updater runs with --allow-local-operator"
+                    .into()
+            }
+            (false, uid) => format!(
+                "a request without a claims header is accepted only from uid 0, not from uid {uid}"
+            ),
+        }),
+    }
+}
+
+/// Applies the checks of step 1 in order to a request from a peer with uid `peer_uid` (or
+/// the reason the peer's uid cannot be read): the peer rule (`bad_peer`, `no_claims`), the
+/// claims parse (`bad_request`), `exp` (`expired`) and the `jti` (`replayed`, spent now).
+/// `is_health` requests are accepted from any peer, even one whose uid cannot be read, and
+/// read no claims.
 pub async fn authenticate(
     app: &App,
-    peer_uid: u32,
+    peer_uid: Result<u32, &str>,
     is_health: bool,
     headers: &HeaderMap,
 ) -> Result<Authenticated, ApiError> {
     let has_claims = headers.contains_key(CLAIMS_HEADER);
-    let principal = admit(
-        peer_uid,
-        has_claims,
-        is_health,
-        app.proxy_uid,
-        app.allow_local_operator,
-    )?;
+    let principal = match peer_uid {
+        Ok(uid) => admit(
+            uid,
+            has_claims,
+            is_health,
+            app.proxy_uid,
+            app.allow_local_operator,
+        )
+        .map_err(|r| peer_refusal(r, uid, has_claims))?,
+        Err(_) if is_health => Principal::Anyone,
+        Err(reason) => {
+            return Err(ApiError::BadPeer(format!(
+                "the peer's credentials cannot be read: {reason}"
+            )));
+        }
+    };
     if principal != Principal::Proxy {
         return Ok(Authenticated {
             principal,

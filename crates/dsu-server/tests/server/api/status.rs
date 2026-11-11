@@ -228,28 +228,6 @@ async fn a_state_directory_that_fails_to_write_is_500() {
 }
 
 #[tokio::test]
-async fn a_connection_whose_peer_cannot_be_read_is_closed() {
-    let (_env, u) = setup().await;
-    u.fail_peer(true);
-    let r = raw_bytes(u.socket(), &http("GET", "/v1/health", &[], b"")).await;
-    assert!(r.is_empty(), "no answer");
-    u.fail_peer(false);
-    assert_eq!(
-        u.call(OTHER, "GET", "/v1/health", None, b"").await.status,
-        200
-    );
-}
-
-async fn raw_bytes(socket: &std::path::Path, request: &[u8]) -> Vec<u8> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut stream = tokio::net::UnixStream::connect(socket).await.unwrap();
-    let _ = stream.write_all(request).await;
-    let mut data = Vec::new();
-    let _ = stream.read_to_end(&mut data).await;
-    data
-}
-
-#[tokio::test]
 async fn the_server_stops_when_told() {
     let (_env, u) = setup().await;
     assert!(u.stop().await.is_ok());

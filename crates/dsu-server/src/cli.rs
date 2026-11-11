@@ -14,6 +14,7 @@ use dsu_core::ids::{Digest, ServiceName};
 use crate::app::{App, Params, image_reference};
 use crate::clock::{Clock, SystemClock};
 use crate::fetch::{FetchError, SystemDisk, default_roots, roots_from_pem};
+use crate::log::Log;
 use crate::net::SystemNetwork;
 use crate::peer::SystemPeerCred;
 use crate::pipeline::{self, PipelineError, VerifyJob};
@@ -234,6 +235,7 @@ pub async fn serve(args: ServeArgs, ready: impl FnOnce()) -> Result<(), CliError
             .into_owned(),
         clock: Arc::new(SystemClock),
         peer_cred: Arc::new(SystemPeerCred),
+        log: Log::stderr(),
         network: Arc::new(SystemNetwork),
         disk: Arc::new(SystemDisk),
         tls_roots,

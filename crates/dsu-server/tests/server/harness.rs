@@ -1,18 +1,20 @@
-//! A running updater for the API tests: the fake Docker daemon, the fake clock, a fake peer
-//! uid, the server on a Unix socket in a temporary directory, and a raw HTTP client.
+//! A running updater for the API tests: the fake Docker daemon, the fake clock, fake peer
+//! credentials, the server on a Unix socket in a temporary directory, its log in memory, and a
+//! raw HTTP client.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use base64::Engine as _;
 use dsu_core::ids::{DeployId, Digest};
 use dsu_core::record::{Record, State};
 use dsu_server::app::{App, Params};
 use dsu_server::fetch::{Disk, SystemDisk, default_roots};
+use dsu_server::log::Log;
 use dsu_server::net::Network;
-use dsu_server::peer::PeerCred;
+use dsu_server::peer::{Credentials, PeerCred};
 use dsu_server::runner::recover;
 use dsu_server::server::{ServeError, bind_socket, serve};
 use dsu_server::startup::load_config;
@@ -89,18 +91,31 @@ pub fn app_image(n: u8) -> String {
     format!("{REGISTRY}/app@{}", digest(n))
 }
 
-/// A peer whose uid the test sets, and that can be made to fail.
+/// The pid the fake peer reports unless a test sets its credentials: a process in the
+/// updater's own pid namespace.
+pub const PEER_PID: i32 = 4242;
+
+/// Credentials as the kernel gives them for a process in the updater's pid namespace.
+pub fn credentials(uid: u32) -> Credentials {
+    Credentials {
+        pid: PEER_PID,
+        uid,
+        gid: uid,
+    }
+}
+
+/// A peer whose credentials the test sets, and that can be made to fail.
 pub struct FakePeer {
-    uid: AtomicU32,
+    credentials: Mutex<Credentials>,
     fail: AtomicBool,
 }
 
 impl PeerCred for FakePeer {
-    fn uid(&self, _stream: &UnixStream) -> std::io::Result<u32> {
+    fn credentials(&self, _stream: &UnixStream) -> std::io::Result<Credentials> {
         if self.fail.load(Ordering::SeqCst) {
             Err(std::io::Error::other("no credentials"))
         } else {
-            Ok(self.uid.load(Ordering::SeqCst))
+            Ok(*self.credentials.lock().unwrap())
         }
     }
 }
@@ -204,6 +219,7 @@ impl Default for Options {
 pub struct Updater {
     pub app: Arc<App>,
     peer: Arc<FakePeer>,
+    log: Arc<Mutex<Vec<u8>>>,
     socket: PathBuf,
     stop: Option<oneshot::Sender<()>>,
     task: Option<JoinHandle<Result<(), ServeError>>>,
@@ -297,9 +313,10 @@ impl Updater {
     pub async fn start_unsettled(env: &Env, options: Options) -> Updater {
         let loaded = load_config(&env.config_path).unwrap();
         let peer = Arc::new(FakePeer {
-            uid: AtomicU32::new(PROXY),
+            credentials: Mutex::new(credentials(PROXY)),
             fail: AtomicBool::new(false),
         });
+        let log = Arc::new(Mutex::new(Vec::new()));
         let app = App::start(Params {
             config: loaded.config,
             roots: loaded.roots,
@@ -310,6 +327,7 @@ impl Updater {
             hostname: options.hostname,
             clock: Arc::new(env.clock.clone()),
             peer_cred: peer.clone(),
+            log: Log::new(log.clone()),
             network: options.network,
             disk: options.disk,
             tls_roots: options.tls_roots,
@@ -324,6 +342,7 @@ impl Updater {
         Updater {
             app,
             peer,
+            log,
             socket: env.socket(),
             stop: Some(stop),
             task: Some(task),
@@ -340,7 +359,20 @@ impl Updater {
     }
 
     pub fn set_peer(&self, uid: u32) {
-        self.peer.uid.store(uid, Ordering::SeqCst);
+        self.set_credentials(credentials(uid));
+    }
+
+    pub fn set_credentials(&self, credentials: Credentials) {
+        *self.peer.credentials.lock().unwrap() = credentials;
+    }
+
+    /// The lines the server logged so far.
+    pub fn log_lines(&self) -> Vec<String> {
+        String::from_utf8(self.log.lock().unwrap().clone())
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect()
     }
 
     pub fn fail_peer(&self, fail: bool) {

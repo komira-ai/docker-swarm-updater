@@ -50,13 +50,18 @@ CI job ──OIDC bearer token──> fronting proxy (verifies the token; exact 
   grants. The token's audience is a guard against tokens minted for another receiver, not an access control: any workflow can ask for any
   audience.
 - **Only the proxy's process can call it.** It listens on one Unix socket and nothing else; the socket's directory and mode let only
-  `--socket-group` (and root) open it. On every connection it reads the peer's uid with `SO_PEERCRED`:
+  `--socket-group` (and root) open it. On every connection it reads the peer's uid with `SO_PEERCRED`, as the kernel maps it into
+  the updater's user namespace; the peer's pid is never consulted (it is 0 for a client outside the updater's pid namespace, such as
+  root on the host of the updater's container):
   - a request **with** the claims header is accepted only from a peer whose uid is `--proxy-uid`;
   - a request **without** it is accepted only from uid 0, and only when `--allow-local-operator` is given; the record names
     `operator (uid 0)`. Root on the node already controls Docker, so this grants nothing new;
   - every other combination is refused 401 `bad_peer` (a headerless request from a uid other than 0 included). A claims header from
     uid 0 is refused: the operator path never carries claims. The one exception is `GET /v1/health`, answered for any peer that can
     open the socket, with or without claims (it carries no data).
+  - a connection whose peer's credentials cannot be read is still answered: health as above, every other request 401 `bad_peer`
+    with the reason. Every request refused 401 or 403 is logged on stderr with the method, the path, the peer's uid, gid and pid, and
+    the answer, so a refused peer is never a silent close.
   - `--proxy-uid 0` is refused at start. The node must have no other account with the proxy's uid; the updater cannot check that.
 - **One token per request.** A token's `jti` is accepted once, on any route. The caller asks for a new token for every request (a local
   call on a GitHub runner). Accepted ids are kept in the state directory until their `exp` passes, so a restart does not forget them. A
@@ -358,7 +363,7 @@ check is `probe --unix <its socket> /v1/health`.
   (including name resolution), `Clock`, `PeerCred` (the uid of a connection's peer). Errors are `thiserror` enums with context in every
   library crate; `anyhow` only in the binary.
 - `tokio` and `hyper` (server on a Unix socket, clients for the Docker socket and HTTPS with `rustls`). No `unsafe`; `SO_PEERCRED`
-  through `rustix`.
+  through tokio's `UnixStream::peer_cred` (rustix's `UCred` holds the pid as a non-zero integer, so it cannot hold the kernel's pid 0).
 
 ### 5.1 The Sigstore verifier: the first item
 
@@ -395,7 +400,7 @@ not fetched. Real-world compatibility is the fixture test of 5.1. No test reads 
 | happy path | good release, Swarm converges | `converged`; registry has the manifest by digest; the update body differs from the spec read in exactly `Image` and the two labels |
 | idempotency | same (service, digest) after it converged; while it runs | 200 with that record, no fetch or update |
 | concurrency | another digest of the service while one runs; two services at once | 409 `busy` with the running id; both converge |
-| peer and claims | claims from `--proxy-uid`; claims from another uid; claims from uid 0; no claims from uid 0 with and without `--allow-local-operator`; no claims from another uid; no claims from `--proxy-uid`; `/v1/health` from another uid | accepted; 401 `bad_peer`; 401 `bad_peer`; accepted (record names the operator) / 401 `bad_peer`; 401 `bad_peer`; 401 `no_claims`; 200 |
+| peer and claims | claims from `--proxy-uid`; claims from another uid; claims from uid 0; no claims from uid 0 with and without `--allow-local-operator`; no claims from another uid; no claims from `--proxy-uid`; `/v1/health` from another uid; no claims from uid 0 with pid 0 (outside the pid namespace) with and without `--allow-local-operator`; credentials unreadable, health and another route | accepted; 401 `bad_peer`; 401 `bad_peer`; accepted (record names the operator) / 401 `bad_peer`; 401 `bad_peer`; 401 `no_claims`; 200; accepted / 401 `bad_peer`; 200 / 401 `bad_peer`; each 401 and 403 logged with its reason |
 | claims | malformed header; expired `exp` (401 `expired`); `jti` reused on Deploy, on Status, after a restart; a refused request's `jti` reused; `jti` files after `exp` (fake clock) | 400; 401; 401 `replayed` each; 401 `replayed`; pruned |
 | mapping | caller of service A deploys B; reads a record of B; lists | 403 `not_allowed`; 404 `unknown_deploy`; only A's services |
 | request | unknown service; unknown field; `allow_older` from a caller; `signer` differing in one field; body of 16 KiB + 1 | 404; 400; 400; 403 `signer_mismatch`; 413 |
