@@ -324,7 +324,7 @@ async fn a_caller_is_named_in_the_record_and_the_record_is_a_file() {
 
 #[tokio::test]
 async fn idempotency_and_concurrency_rows() {
-    let (_env, u) = setup().await;
+    let (env, u) = setup().await;
     let (app, web) = (caller("app"), caller("web"));
     let first = u
         .as_caller(
@@ -349,6 +349,8 @@ async fn idempotency_and_concurrency_rows() {
         (again.status, again.json()["id"].clone()),
         (200, id.clone())
     );
+    assert_eq!(env.state_files("deploys").len(), 1, "no second record");
+    assert!(env.docker().updates().is_empty(), "nothing asked of Swarm");
     // Another digest of the service: busy, naming the running id.
     let other = u
         .as_caller(
@@ -411,7 +413,8 @@ async fn a_converged_digest_that_swarm_runs_on_every_task_is_200() {
         .await;
     assert_eq!(r.status, 200);
     assert_eq!(r.json()["id"], "d-bbbbbbbbbbbbbbbbbbbbbbbbbb");
-    assert_eq!(env.state_files("deploys").len(), 1);
+    assert_eq!(env.state_files("deploys").len(), 1, "no second record");
+    assert!(env.docker().updates().is_empty(), "nothing asked of Swarm");
     // A task on another image: the deploy runs again.
     env.docker().set_tasks(
         "app_server",

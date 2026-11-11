@@ -62,6 +62,22 @@ async fn open_creates_the_three_directories_and_an_empty_store() {
     assert!(names(&state, ".").iter().all(|n| n != "health"));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn overlapping_health_checks_all_succeed() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = std::sync::Arc::new(Store::open(dir.path(), now()).await.unwrap());
+    let checks: Vec<_> = (0..64)
+        .map(|_| {
+            let store = std::sync::Arc::clone(&store);
+            tokio::spawn(async move { store.check_writable().await })
+        })
+        .collect();
+    for check in checks {
+        check.await.unwrap().unwrap();
+    }
+    assert!(names(dir.path(), ".").iter().all(|n| n != "health"));
+}
+
 #[tokio::test]
 async fn records_and_service_state_are_written_and_loaded_again() {
     let dir = tempfile::tempdir().unwrap();

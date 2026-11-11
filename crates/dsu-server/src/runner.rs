@@ -21,8 +21,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dsu_core::config::ServiceConfig;
-use dsu_core::ids::Digest;
-use dsu_core::record::{ErrorToken, Phase, Record, TransitionError, enters_failed_list};
+use dsu_core::ids::{Digest, ServiceName};
+use dsu_core::record::{ErrorToken, Phase, Record, State, TransitionError, enters_failed_list};
 use dsu_core::retention::to_delete;
 use dsu_core::swarm::{self, RestartAction, Snapshot, Verdict, restart_action};
 use dsu_core::url::ReleaseUrl;
@@ -104,12 +104,45 @@ pub async fn recover(app: &Arc<App>) -> Result<(), RunnerError> {
     // Best effort: a directory that is not there is the normal case, and leftovers only
     // cost disk.
     let _ = tokio::fs::remove_dir_all(app.store.dir().join(DOWNLOADS)).await;
+    // Decided before any wait task starts: these records are final and no task works on them.
+    let unfinished = app.store.finished_but_pending().await;
     for record in app.store.running_records().await {
         match app.service(&record.service).cloned() {
             Some(service) => settle(app, record, service).await?,
             None => abandon(app, record).await?,
         }
     }
+    for (name, record) in unfinished {
+        complete_service_state(app, &name, &record).await?;
+    }
+    Ok(())
+}
+
+/// Finishes the service-state half of a conclusion the last process stopped in the middle
+/// of: the record is final, the service still names it as pending.
+async fn complete_service_state(
+    app: &App,
+    name: &ServiceName,
+    record: &Record,
+) -> Result<(), RunnerError> {
+    let digest = record.image_digest.clone();
+    let signed_time = record.signed_time.unwrap_or(record.started);
+    let id = record.id.clone();
+    let converged = record.state == State::Converged;
+    let listed = record
+        .error
+        .as_ref()
+        .is_some_and(|e| enters_failed_list(e.token, false));
+    app.store
+        .update_service(name, |s| {
+            s.clear_pending();
+            if converged {
+                s.record_converged(digest, signed_time, id);
+            } else if listed {
+                s.add_failed(digest);
+            }
+        })
+        .await?;
     Ok(())
 }
 
@@ -614,54 +647,67 @@ impl Run {
         (deleted, note)
     }
 
-    /// Ends the record: the state of the service (floor, lists, snapshot), the lock, and the
-    /// final record, in that order, so a final record means everything else is done.
+    /// Ends the record: the final record first, then the state of the service (floor, lists,
+    /// snapshot), with the lock held throughout. A crash between the two writes leaves a final
+    /// record and a service that still names it as pending, which [`recover`] completes; a
+    /// crash before them leaves a running record and the pending snapshot, which the restart
+    /// rule settles. When a write fails the lock is kept (the service stays busy until the
+    /// next start settles it) because releasing it would let a request for the same digest be
+    /// answered with a record no task works on.
     async fn conclude(mut self, result: Result<(), Failure>) -> Result<(), RunnerError> {
         let mut notes = self.observations();
         let now = self.app.clock.now();
-        let name = self.service.name.clone();
         let digest = self.record.image_digest.clone();
-        let id = self.record.id.clone();
-        match result {
+        let mut deleted = Vec::new();
+        let failure = match result {
             Ok(()) => {
-                let (deleted, note) = self.retire().await;
+                let (gone, note) = self.retire().await;
+                deleted = gone;
                 notes.extend(note);
-                let signed_time = self.record.signed_time.unwrap_or(self.record.started);
-                self.app
-                    .store
-                    .update_service(&name, |s| {
-                        s.clear_pending();
-                        s.record_converged(digest, signed_time, id);
-                        s.forget_pushed(&deleted);
-                    })
-                    .await?;
                 self.annotate(notes)?;
                 self.record.finish_converged(now)?;
+                None
             }
             Err(failure) => {
-                let listed = enters_failed_list(failure.token, failure.digest_bound);
-                self.app
-                    .store
-                    .update_service(&name, |s| {
-                        s.clear_pending();
-                        if listed {
-                            s.add_failed(digest);
-                        }
-                    })
-                    .await?;
                 self.annotate(notes)?;
+                let listed = enters_failed_list(failure.token, failure.digest_bound);
                 self.record
                     .finish_failed(failure.token, failure.detail, now)?;
+                Some(listed)
+            }
+        };
+        let written = match self.app.store.put_record(&self.record).await {
+            Ok(()) => {
+                let signed_time = self.record.signed_time.unwrap_or(self.record.started);
+                let id = self.record.id.clone();
+                self.app
+                    .store
+                    .update_service(&self.service.name, |s| {
+                        s.clear_pending();
+                        match failure {
+                            None => {
+                                s.record_converged(digest, signed_time, id);
+                                s.forget_pushed(&deleted);
+                            }
+                            Some(true) => s.add_failed(digest),
+                            Some(false) => {}
+                        }
+                    })
+                    .await
+            }
+            Err(error) => Err(error),
+        };
+        let Run { permit, .. } = self;
+        match written {
+            Ok(()) => {
+                drop(permit);
+                Ok(())
+            }
+            Err(error) => {
+                std::mem::forget(permit);
+                Err(error.into())
             }
         }
-        let Run {
-            app,
-            record,
-            permit,
-            ..
-        } = self;
-        drop(permit);
-        Ok(app.store.put_record(&record).await?)
     }
 
     fn annotate(&mut self, notes: Vec<String>) -> Result<(), TransitionError> {

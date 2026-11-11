@@ -5,8 +5,9 @@ use std::ffi::OsString;
 use std::time::Duration;
 
 use clap::Parser as _;
-use dsu_server::cli::{Cli, CliError, Command, ImportArgs, ProbeArgs, import, probe, run};
-use dsu_server::clock::SystemClock;
+use dsu_server::cli::{
+    Cli, CliError, Command, ImportArgs, ProbeArgs, import, probe, run, run_with_clock,
+};
 use dsu_server::pipeline::PipelineError;
 use dsu_testkit::mint::Authority;
 use dsu_testkit::oci::OciImage;
@@ -14,6 +15,7 @@ use dsu_testkit::registry::{Event, FakeRegistry, Mode};
 
 use crate::harness::{Env, Options, Updater, config_text, write_trusted_root};
 use crate::pipeline::Release;
+use crate::support::FakeClock;
 
 fn parse(args: &[&str]) -> Command {
     let all = std::iter::once("docker-swarm-updater").chain(args.iter().copied());
@@ -209,20 +211,24 @@ async fn probe_exit_codes_against_the_updaters_own_health_route() {
     let u = Updater::start(&env, Options::default()).await;
     let socket = env.socket().display().to_string();
     u.set_peer(1);
+    // The clock never moves: an answer is expected, so the deadline must not fire.
+    let clock = FakeClock::new();
     let healthy = probe_args(&["--unix", &socket], "/v1/health");
-    assert_eq!(probe(&healthy, &SystemClock).await.unwrap(), 0);
+    assert_eq!(probe(&healthy, &clock).await.unwrap(), 0);
     env.docker().set_ping_status(500);
-    assert_eq!(probe(&healthy, &SystemClock).await.unwrap(), 1);
+    assert_eq!(probe(&healthy, &clock).await.unwrap(), 1);
     let mut out = Vec::new();
-    let code = run(Command::Probe(healthy), &mut out).await.unwrap();
+    let code = run_with_clock(Command::Probe(healthy), &mut out, &clock)
+        .await
+        .unwrap();
     assert_eq!(code, 1);
     assert!(out.is_empty(), "nothing on stdout");
     // A target the rules refuse is an error, not an exit code.
-    let error = probe(&probe_args(&[], "http://example.com/x"), &SystemClock)
+    let error = probe(&probe_args(&[], "http://example.com/x"), &clock)
         .await
         .unwrap_err();
     assert!(matches!(error, CliError::Target(_)));
-    let error = probe(&probe_args(&["--unix", &socket], "v1/health"), &SystemClock)
+    let error = probe(&probe_args(&["--unix", &socket], "v1/health"), &clock)
         .await
         .unwrap_err();
     assert!(matches!(error, CliError::Target(_)));

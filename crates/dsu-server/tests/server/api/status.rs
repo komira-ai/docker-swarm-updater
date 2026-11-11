@@ -30,6 +30,8 @@ async fn self_update_rows() {
         .as_operator("POST", &deploys("web"), &deploy_body("web", 5, |_| {}))
         .await;
     assert_eq!(r.status, 200);
+    assert_eq!(env.state_files("deploys").len(), 1, "no second record");
+    assert!(env.docker().updates().is_empty(), "nothing asked of Swarm");
 
     // The other way round: while the self-update runs, any other deploy is refused.
     let env = Env::new().await;
@@ -111,7 +113,11 @@ async fn list_reports_swarm_the_state_and_the_trusted_root() {
             "floor": "2026-10-01T12:00:00Z",
         }])
     );
-    assert!(body["trusted_root_newest_key"]["from"].as_str().is_some());
+    // The test authority's keys are valid from `authority_start` with no end.
+    assert_eq!(
+        body["trusted_root_newest_key"],
+        json!({"from": dsu_testkit::mint::authority_start().to_string()})
+    );
     // A service Swarm has not got: no digests, no update state; a service never deployed:
     // no last deploy.
     let r = u.as_operator("GET", LIST, b"").await;

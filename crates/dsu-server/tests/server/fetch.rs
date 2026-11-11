@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use crate::support::{ConnectMode, FakeClock, FakeDisk, FakeNetwork};
 use dsu_core::record::ErrorToken;
+use dsu_server::cli::ca_roots;
 use dsu_server::clock::{Clock, SystemClock, with_deadline};
 use dsu_server::fetch::{
     CONNECT_TIMEOUT, Disk, FetchError, Fetched, Fetcher, Limits, MAX_REDIRECTS, READ_TIMEOUT,
@@ -482,6 +483,44 @@ async fn the_next_address_is_tried_when_the_first_refuses() {
     .await;
     assert_eq!(w.fetch(&NO_LIMITS).await.unwrap().size, 10);
     assert_eq!(w.network.connects().len(), 2);
+}
+
+#[tokio::test]
+async fn the_roots_of_a_ca_file_are_the_ones_downloads_trust() {
+    let w = world(vec![(PATH, Route::File(body(10)))]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("ca.pem");
+    std::fs::write(&file, w.server.ca_pem()).unwrap();
+    let fetcher = |roots| {
+        Fetcher::new(
+            w.network.clone(),
+            Arc::new(w.clock.clone()),
+            Arc::new(SystemDisk),
+            roots,
+            redirect_hosts(),
+        )
+        .unwrap()
+    };
+    // With the file's roots the test server's certificate is trusted ...
+    let trusting = fetcher(ca_roots(&file).unwrap());
+    let fetched = trusting
+        .fetch(&release_url(), w.dir.path(), "f", &NO_LIMITS)
+        .await
+        .unwrap();
+    assert_eq!(fetched.size, 10);
+    // ... and with the built-in roots it is not.
+    let err = fetcher(default_roots())
+        .fetch(&release_url(), w.dir.path(), "g", &NO_LIMITS)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, FetchError::Tls { .. }), "{err:?}");
+    // A file with no certificate is refused.
+    std::fs::write(&file, "").unwrap();
+    assert!(matches!(ca_roots(&file), Err(FetchError::CaFile(_))));
+    assert!(matches!(
+        ca_roots(&dir.path().join("none.pem")),
+        Err(FetchError::CaFile(_))
+    ));
 }
 
 #[tokio::test]

@@ -342,7 +342,7 @@ async fn request_rows() {
 
 #[tokio::test]
 async fn a_body_that_ends_early_is_a_bad_request() {
-    let (_env, u) = setup().await;
+    let (env, u) = setup().await;
     u.set_peer(PROXY);
     let mut request = http(
         "POST",
@@ -360,9 +360,13 @@ async fn a_body_that_ends_early_is_a_bad_request() {
     stream.write_all(&request).await.unwrap();
     stream.shutdown().await.unwrap();
     let mut data = Vec::new();
-    let _ = stream.read_to_end(&mut data).await;
-    // The answer may or may not arrive before the connection is torn down; the server must
-    // still be serving afterwards.
+    stream.read_to_end(&mut data).await.unwrap();
+    let r = parse_reply(&data);
+    assert_eq!((r.status, r.error().as_str()), (400, "bad_request"));
+    assert!(
+        env.state_files("deploys").is_empty(),
+        "no record was written"
+    );
     assert_eq!(u.as_operator("GET", LIST, b"").await.status, 200);
 }
 

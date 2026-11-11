@@ -190,10 +190,19 @@ fn run_blocking(command: Command) -> Result<u8, CliError> {
 
 /// Runs one command; `import` writes the image reference to `out`. Returns the exit code.
 pub async fn run(command: Command, out: &mut dyn Write) -> Result<u8, CliError> {
+    run_with_clock(command, out, &SystemClock).await
+}
+
+/// [`run`] with the clock `probe` measures its deadline on.
+pub async fn run_with_clock(
+    command: Command,
+    out: &mut dyn Write,
+    clock: &dyn Clock,
+) -> Result<u8, CliError> {
     match command {
         Command::Serve(args) => serve(args, || {}).await?,
         Command::Import(args) => import(&args, out).await?,
-        Command::Probe(args) => return probe(&args, &SystemClock).await,
+        Command::Probe(args) => return probe(&args, clock).await,
     }
     Ok(0)
 }
@@ -238,7 +247,9 @@ pub async fn serve(args: ServeArgs, ready: impl FnOnce()) -> Result<(), CliError
     Ok(())
 }
 
-fn ca_roots(path: &std::path::Path) -> Result<rustls::RootCertStore, FetchError> {
+/// The trust `serve --ca-file` gives downloads: exactly the certificates of the PEM file at
+/// `path`, in place of the built-in roots.
+pub fn ca_roots(path: &std::path::Path) -> Result<rustls::RootCertStore, FetchError> {
     let pem = std::fs::read(path).map_err(|e| FetchError::CaFile(e.to_string()))?;
     roots_from_pem(&pem)
 }

@@ -97,7 +97,7 @@ pub fn signed_at() -> jiff::Timestamp {
 }
 
 /// When the test authorities' keys and certificate authorities start to be valid.
-fn authority_start() -> jiff::Timestamp {
+pub fn authority_start() -> jiff::Timestamp {
     "2026-09-15T00:00:00Z".parse().unwrap()
 }
 

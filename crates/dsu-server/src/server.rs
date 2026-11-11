@@ -155,6 +155,8 @@ pub async fn serve(
                 let (stream, _) = accepted?;
                 connections.spawn(connection(Arc::clone(&app), stream));
             }
+            // Reap the connections that ended, so the set does not grow with every request.
+            Some(_) = connections.join_next(), if !connections.is_empty() => {}
         }
     }
 }

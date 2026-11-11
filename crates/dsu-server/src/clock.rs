@@ -1,5 +1,8 @@
-//! The program's view of time. Everything that reads the time of day, pauses, or limits how
-//! long something may take goes through [`Clock`], so tests drive time by hand.
+//! The program's view of time. Everything the program itself reads the time of day for,
+//! pauses on, or limits with a deadline (waits, the request body, fetches, probes) goes
+//! through [`Clock`], so tests drive time by hand. The one exception is the server's
+//! request-head and idle timeout, which is hyper's own timer on tokio's clock; tests drive
+//! it with tokio's paused time.
 
 use std::future::Future;
 use std::pin::{Pin, pin};

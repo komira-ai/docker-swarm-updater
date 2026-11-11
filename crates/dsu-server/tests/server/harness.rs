@@ -287,6 +287,14 @@ pub fn parse_reply(data: &[u8]) -> Reply {
 
 impl Updater {
     pub async fn start(env: &Env, options: Options) -> Updater {
+        let updater = Self::start_unsettled(env, options).await;
+        recover(&updater.app).await.unwrap();
+        updater
+    }
+
+    /// Like [`Updater::start`], but the records a previous process left running are not
+    /// settled: the test calls `recover` itself.
+    pub async fn start_unsettled(env: &Env, options: Options) -> Updater {
         let loaded = load_config(&env.config_path).unwrap();
         let peer = Arc::new(FakePeer {
             uid: AtomicU32::new(PROXY),
@@ -308,7 +316,6 @@ impl Updater {
         })
         .await
         .unwrap();
-        recover(&app).await.unwrap();
         let listener = bind_socket(&env.socket(), current_gid()).unwrap();
         let (stop, stopped) = oneshot::channel();
         let task = tokio::spawn(serve(Arc::clone(&app), listener, async {

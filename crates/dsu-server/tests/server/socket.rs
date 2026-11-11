@@ -168,7 +168,7 @@ async fn serve_answers_until_a_stop_signal() {
 }
 
 #[tokio::test]
-async fn a_ca_file_with_a_certificate_replaces_the_built_in_roots() {
+async fn serve_starts_with_a_ca_file_and_stops_on_a_signal() {
     let _one_at_a_time = SIGNALS.lock().await;
     let env = Env::new().await;
     let mut serve_args = args(&env);

@@ -3,6 +3,7 @@
 use crate::harness::*;
 use crate::support::HookDisk;
 use dsu_core::record::{CallerRecord, ErrorToken, Record, State};
+use dsu_server::runner::recover;
 use dsu_testkit::mint::Authority;
 use dsu_testkit::registry::{Event, Mode};
 
@@ -110,7 +111,7 @@ async fn the_operator_deploys_a_release_end_to_end() {
 // the state directory and the downloads
 
 #[tokio::test]
-async fn a_state_directory_that_stops_working_ends_the_deploy_and_frees_the_service() {
+async fn a_state_directory_that_stops_working_keeps_the_service_locked_until_the_next_start() {
     let (w, rels) = World::new(Mode::Normal, |a| {
         vec![Rel::new(a, "app", "a"), Rel::new(a, "app", "b")]
     })
@@ -135,12 +136,15 @@ async fn a_state_directory_that_stops_working_ends_the_deploy_and_frees_the_serv
     let reply = post(&u, &rels[0]).await;
     assert_eq!(reply.status, 202);
     u.app.wait_deploys().await;
-    // Nothing more was asked of Swarm or the registry, the snapshot is clear and the
-    // service is free again; the record could not say so and is left for the next start.
+    // Nothing more was asked of Swarm or the registry. The record could not be ended, so
+    // it stays running and its service stays locked until the next start settles it.
     assert!(w.docker().updates().is_empty() && w.registry.events().is_empty());
     assert!(service_state(&u, "app").await.pending.is_none());
     assert!(w.downloads().is_empty());
     std::fs::rename(&saved, &deploys_dir).unwrap();
+    let busy = post(&u, &rels[1]).await;
+    assert_eq!((busy.status, busy.error().as_str()), (409, "busy"));
+    recover(&u.app).await.unwrap();
     let next = post(&u, &rels[1]).await;
     assert_eq!(next.status, 202);
     assert_eq!(

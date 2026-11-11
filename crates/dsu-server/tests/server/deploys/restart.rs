@@ -111,6 +111,91 @@ async fn a_restart_after_swarm_settled_ends_the_record_at_start() {
 }
 
 #[tokio::test]
+async fn a_final_record_that_cannot_be_written_leaves_the_restart_rule_in_charge() {
+    let (w, rel) = World::one(|a| Rel::new(a, "app", "a")).await;
+    let id = left_waiting(&w, &rel).await;
+    w.script(Outcome::Converges);
+    w.swarm().inspect_service("app_server").await.unwrap();
+    let u = Updater::start_unsettled(&w.env, Options::default()).await;
+    // The final write of the record cannot create its temporary file.
+    let blocked = w
+        .env
+        .state_dir()
+        .join("deploys")
+        .join(format!("{id}.json.tmp"));
+    std::fs::create_dir(&blocked).unwrap();
+    let error = recover(&u.app).await.unwrap_err();
+    assert!(matches!(error, RunnerError::Store(_)), "{error}");
+    let record = u.app.store.record(&id).await.unwrap();
+    assert_eq!(record.state, State::Running);
+    let state = service_state(&u, "app").await;
+    assert!(state.pending.is_some(), "the snapshot is kept");
+    assert_eq!(state.floor, None);
+    // The service stays locked: the same digest is not answered with a record no task works on.
+    let other = Rel::new(&w.env.authority, "app", "z");
+    assert_eq!(post(&u, &other).await.status, 409);
+    // The next start settles the record as the outcome Swarm shows.
+    std::fs::remove_dir(&blocked).unwrap();
+    recover(&u.app).await.unwrap();
+    let record = u.app.store.record(&id).await.unwrap();
+    assert_eq!(outcome(&record), (State::Converged, None));
+    let state = service_state(&u, "app").await;
+    assert_eq!(state.floor, Some(signed_at()));
+    assert!(state.pending.is_none());
+}
+
+#[tokio::test]
+async fn a_restart_between_the_final_record_and_the_service_state_completes_the_state() {
+    let cases = [
+        (State::Converged, None),
+        (State::RolledBack, Some(ErrorToken::SwarmRolledBack)),
+        (State::Paused, Some(ErrorToken::SwarmPaused)),
+    ];
+    for (state, token) in cases {
+        let (w, rel) = World::one(|a| Rel::new(a, "app", "a")).await;
+        let u = w.updater().await;
+        let now = u.app.clock.now();
+        let id = "d-dddddddddddddddddddddddddd";
+        let mut record = crafted("app", &rel.digest(), id, &TO_WAITING, now);
+        match token {
+            None => record.finish_converged(now).unwrap(),
+            Some(token) => record.finish_failed(token, "x", now).unwrap(),
+        }
+        assert_eq!(record.state, state);
+        u.app.store.put_record(&record).await.unwrap();
+        let snapshot = Snapshot {
+            version_index: 1,
+            read_at: now,
+        };
+        u.app
+            .store
+            .update_service(&ServiceName::parse("app").unwrap(), |s| {
+                s.set_pending(DeployId::parse(id).unwrap(), snapshot);
+            })
+            .await
+            .unwrap();
+        u.stop().await.unwrap();
+
+        let second = w.updater().await;
+        let after = service_state(&second, "app").await;
+        assert!(after.pending.is_none());
+        assert_eq!(after.floor.is_some(), state == State::Converged);
+        assert_eq!(
+            after.converged_digests().len(),
+            usize::from(state == State::Converged)
+        );
+        assert_eq!(after.is_failed(&rel.digest()), state == State::RolledBack);
+        let record = second
+            .app
+            .store
+            .record(&DeployId::parse(id).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(record.state, state, "the final record is not changed");
+    }
+}
+
+#[tokio::test]
 async fn a_restart_finds_a_spec_no_update_of_the_deploy_explains() {
     let (w, rel) = World::one(|a| Rel::new(a, "app", "a")).await;
     let first = w.updater().await;

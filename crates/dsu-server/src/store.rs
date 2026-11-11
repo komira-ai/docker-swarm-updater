@@ -208,8 +208,10 @@ impl Store {
         self.changes.subscribe()
     }
 
-    /// Proves the directory can be written to: a file is created, synced and removed.
+    /// Proves the directory can be written to: a file is created, synced and removed. It runs
+    /// under the store's lock, so overlapping checks never share the file.
     pub async fn check_writable(&self) -> Result<(), StoreError> {
+        let _inner = self.inner.lock().await;
         let path = self.dir.join("health");
         write_atomic(&path, b"ok").await?;
         fs::remove_file(&path).await.map_err(io_at(&path))
@@ -263,6 +265,20 @@ impl Store {
             .collect();
         running.sort_by(|a, b| (a.started, &a.id).cmp(&(b.started, &b.id)));
         running
+    }
+
+    /// The services whose state still names a deploy as pending although that deploy's
+    /// record is final: a conclusion the last process did not finish.
+    pub async fn finished_but_pending(&self) -> Vec<(ServiceName, Record)> {
+        let inner = self.inner.lock().await;
+        inner
+            .services
+            .iter()
+            .filter_map(|(name, state)| {
+                let record = inner.records.get(&state.pending.as_ref()?.deploy)?;
+                (record.state != State::Running).then(|| (name.clone(), record.clone()))
+            })
+            .collect()
     }
 
     /// The state of `service`: the default (nothing failed, nothing converged) when no file

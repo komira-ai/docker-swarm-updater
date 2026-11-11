@@ -4,7 +4,6 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use crate::support::FakeClock;
-use dsu_server::clock::SystemClock;
 use dsu_server::probe::{ProbeFailure, ProbeOutcome, ProbeTarget, TargetError, probe};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UnixListener};
@@ -55,8 +54,9 @@ async fn tcp_target(path: &str) -> (TcpListener, ProbeTarget) {
     (listener, target)
 }
 
+/// Probes on a clock that never moves, so the deadline cannot fire before an answer.
 async fn run(target: &ProbeTarget) -> ProbeOutcome {
-    probe(target, TIMEOUT, &SystemClock).await
+    probe(target, TIMEOUT, &FakeClock::new()).await
 }
 
 #[tokio::test]
