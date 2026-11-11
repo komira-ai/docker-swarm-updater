@@ -352,7 +352,8 @@ check is `probe --unix <its socket> /v1/health`.
 - **Crates**: `dsu-core` (pure: config and its checks, claim and peer rules, URL rules, the record state machine, OCI layout reading,
   retention, the UpdateStatus rule; no I/O, no clock, `BTreeMap` only), `dsu-verify` (section 5.1), `dsu-docker` (the Docker Engine API
   subset over a Unix socket), `dsu-registry` (the distribution API subset), `dsu-server` (the HTTP API, state files, the deploy runner),
-  `docker-swarm-updater` (the binary; `main.rs` forwards to `dsu-server`).
+  `docker-swarm-updater` (the binary; `main.rs` forwards to `dsu-server`), `dsu-deploy` (the client the reusable workflow runs,
+  section 7), `xtask` (repository checks and the release steps of section 7).
 - Each side effect is behind a narrow trait with a real implementation and the fake of section 6: `Docker`, `Registry`, `Fetch`
   (including name resolution), `Clock`, `PeerCred` (the uid of a connection's peer). Errors are `thiserror` enums with context in every
   library crate; `anyhow` only in the binary.
@@ -413,6 +414,8 @@ not fetched. Real-world compatibility is the fixture test of 5.1. No test reads 
 | retention | after a converge with five earlier digests | running, previous and the last three kept; the others deleted by digest |
 | config | each refusal of 2.3; `--proxy-uid 0` | start refused naming the key or flag |
 | health, probe | `/v1/health` with Docker answering and not; `probe`: 200, 503, refused, timeout, non-loopback URL, `--unix` | 200, 503; 0, 1, 1, 1, refused, 0 |
+| deploy client (`dsu-deploy`) | Deploy 202 then Status to `converged`; Deploy answered `converged`; ending `failed`, `rolled_back`, `paused`, an unknown state; Deploy or Status refused; a 503 or a connection failure on Deploy, on Status; never accepted, never final within `wait-minutes` (fake clock); `wait-minutes` 0; GitHub mints no token; an answer that is not the deploy's record; a `version` of 128 and 129 bytes; no token-request bearer | exit 0, a new token per request; exit 0, no Status; exit 1 with the record's error each; exit 1 with the answer's error; retried each; exit 1 "not accepted", "still running; it continues"; waits on; exit 1, nothing sent; exit 1; accepted, exit 2; exit 2 |
+| release (`cargo xtask release`) | the image written twice, with another time; the image verified by the updater for its platform, for the other; a binary with and without a program interpreter, a truncated or 32-bit ELF; a release directory exact, with a file missing or extra; a stamped workspace | the same bytes, other bytes; verifies, `platform_mismatch`; refused, passes, refused; `SHA256SUMS` written, refused; only workspace crates move in `Cargo.lock` |
 
 Why this list is complete: every input the program takes is one row group (peer, claims, mapping, request, request target, URLs,
 release server, bundle, tar, registry, Swarm, its own restart, config), and each group has its good case, every refusal the code names in
@@ -428,20 +431,33 @@ after the hand-off for restarts, the size and free-space limits). A new error to
   no coverage exclusions.
 - Workflows: GitHub-hosted runners only, actions pinned by commit, top-level `permissions: {}`, each job granting only what it uses,
   actionlint clean.
-- Releases from `main`: `artifacts.yml` builds the static binaries and the image tar (an OCI layout, built twice and compared byte for
-  byte); only its `attest` job holds `id-token: write` and `attestations: write`; every released file gets its own `.sigstore.json`.
-  `artifacts.yml` is the signer identity, so it is never renamed.
+- Releases from `main`: every push to `main` runs `artifacts.yml`, which releases `v<major>.<minor>.<commits on main>` (the same commit
+  always gets the same version, a later one a higher one) with, for `linux-x86_64` and `linux-arm64`, the static binary and the image
+  tar: an OCI layout written by `cargo xtask release image`, `FROM scratch`, the binary at `/docker-swarm-updater` as the entrypoint,
+  user `65532:65532`, every time the commit's, plus Docker's `manifest.json` so `docker load` reads it. Before signing it checks that
+  the binary has no program interpreter and prints the version, that rebuilding the workspace's crates gives the same binary byte for
+  byte, that the image written twice is the same bytes, and that the image loads and runs. Only its `attest` job holds
+  `id-token: write` and `attestations: write`, and runs no repository code; every released file gets its own `.sigstore.json`, which
+  `verify` checks against this signer before `publish` creates the release. `artifacts.yml` is the signer identity, so it is never
+  renamed.
 - **The reusable workflow** `.github/workflows/deploy.yml` (`on: workflow_call`). Inputs: `service`, `version`, `image-digest`,
   `image-url`, `bundle-url`, `signer-repository`, `signer-workflow`, `signer-ref` (the last three default to the caller's repository,
   `.github/workflows/artifacts.yml` and `refs/heads/main`), `endpoint`, `audience`, `environment`, `wait-minutes` (default 60),
-  `tailscale-oauth-client-id`, `tailscale-tags` (both optional). Its one
+  `tailscale-oauth-client-id`, `tailscale-audience`, `tailscale-tags` (optional; Tailscale's workload identity needs the client id and
+  its audience). Its one
   job declares `permissions: { id-token: write }` and `environment: ${{ inputs.environment }}` (a job that calls a reusable workflow
   cannot name an environment itself [E], GitHub's reusable-workflow reference), so the environment and its protection rules belong to
-  the calling repository and the token's `environment` claim exists only once that job may run. The caller's job grants
-  `id-token: write`. Steps: an optional network step (inputs `tailscale-oauth-client-id` and `tailscale-tags`; when set, the job joins
-  that Tailscale network as an ephemeral node with `tailscale/github-action` before any call; when empty, the step is skipped); then a new OIDC token with `audience` for every request; Deploy; Status every 10 s until a
-  final state or `wait-minutes`, retrying a 503. `converged` passes; any other final state fails the job with the record's error;
-  `wait-minutes` passing fails it with "deploy <id> still running; it continues".
+  the calling repository and the token's `environment` claim exists only once that job may run. The environment needs no required
+  reviewer: a release deploys when its workflow runs, and what protects the path is the environment's deployment branches (the
+  signing branch only), the claims the proxy and the updater check (repository, repository id, `job_workflow_ref`, ref, environment,
+  runner), the attestation check, the signed-time floor and Swarm's rollback. The caller's job grants `id-token: write`. Steps: an
+  optional network step (when `tailscale-oauth-client-id` is set, the job joins that Tailscale network as an ephemeral node with
+  `tailscale/github-action`, pinned by commit, Tailscale itself pinned by version and SHA-256, before any call; when empty, the step is
+  skipped); then the client `dsu-deploy`, built from the workflow's own commit (the `job` context's `workflow_repository` and
+  `workflow_sha`), which asks for a new OIDC token with `audience` for every request, sends Deploy, then Status every 10 s until a
+  final state or `wait-minutes` (0: no limit), retrying a 503 or a connection failure on either. `converged` passes; any other final
+  state fails the job with the record's error; `wait-minutes` passing fails it with "deploy <id> still running; it continues". One
+  deploy per service at a time runs from a calling repository (a `concurrency` group per service).
 - The caller's workflow must run on its signing branch (a `push` to it or a `workflow_run` of its release workflow there), not on a
   `release` event, because the token's `ref` claim is the triggering ref.
 
@@ -452,12 +468,13 @@ after the hand-off for restarts, the size and free-space limits). A new error to
 | the proxy passes unverified requests | a local process in the proxy's uid can call Deploy for any caller's claims | the configured signer, the subject name and the signed-time floor: only a newer release the configured workflow signed for that service can be deployed |
 | the proxy itself is taken over | it can present any claims | the same three checks; nothing else |
 | the claim mapping is too wide | a listed caller deploys a service it should not | the service's configured signer and `artifact_name`: only that service's own signed images |
-| the signer's branch is unprotected, or its workflow is changed by a writer | a writer of the signer repository can sign an image | nothing in the updater; the signer repository's branch protection and review are the control, and the caller's environment protection is the second |
-| the caller's environment protection is removed by an admin of the calling repository | releases deploy with no person's approval | the signer checks; the updater cannot see environment settings |
+| the signer's branch is unprotected, or its workflow is changed by a writer | a writer of the signer repository can sign an image | nothing in the updater; the signer repository's branch protection and review are the control; Swarm rolls back an image that fails its health check |
+| the caller's environment is opened to other branches by an admin of the calling repository | a workflow run on another branch gets the `environment` claim | the `ref` claim, matched exactly by the proxy and the updater, and the signer checks; the updater cannot see environment settings |
 | the verifier accepts a bad bundle | an attacker's image runs as the service, with its secrets and mounts | the URL rules (the asset must be in the signer's own releases) only; the digest is the caller's, so it is not an independent check |
 | the Docker socket | the updater holds the Docker API, which is root on the node and everything the node holds (every service's secrets, every service it runs) | no TCP listener; a `FROM scratch` image, read-only, all capabilities dropped; the only update body it sends is the read spec with three fields changed (a test asserts it); a socket-filtering proxy is an open question (section 9) |
 | a token is captured | one request until `exp` | `jti` single use; the floor refuses older releases |
-| the docker-swarm-updater release pipeline itself | its next release deploys itself through its own caller | its own signer and environment protection, as for any other service |
+| the docker-swarm-updater release pipeline itself | its next release deploys itself through its own caller | its own signer, claims and environment, as for any other service |
+| the reusable workflow's commit | a caller pinned to it runs that commit's client | callers pin a full commit, and the proxy and the updater match `job_workflow_ref` exactly, so a change reaches no caller until its pin moves |
 
 ## 9. Open questions
 

@@ -387,6 +387,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dsu-deploy"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "dsu-core",
+ "rustls",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "ureq",
+ "url",
+]
+
+[[package]]
 name = "dsu-docker"
 version = "0.1.0"
 dependencies = [
@@ -2166,12 +2180,18 @@ dependencies = [
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "dsu-core",
+ "dsu-server",
+ "dsu-testkit",
+ "dsu-verify",
  "flate2",
  "hex",
+ "jiff",
  "rcgen",
  "rustls",
  "rustls-pki-types",
  "serde",
+ "serde_json",
  "sha2",
  "tar",
  "tempfile",

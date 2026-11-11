@@ -1,0 +1,178 @@
+# The reusable deploy workflow (docs/design.md section 7). A release job of a calling
+# repository runs it to ask docker-swarm-updater, through the proxy in front of it, to deploy
+# one release of one service, and waits for the outcome:
+#
+#   jobs:
+#     deploy:
+#       needs: [release]
+#       permissions:
+#         id-token: write
+#       uses: komira-ai/docker-swarm-updater/.github/workflows/deploy.yml@<40-hex commit>
+#       with:
+#         service: app
+#         version: 1.4.2
+#         image-digest: sha256:<64 hex>
+#         image-url: https://github.com/<owner>/<repo>/releases/download/<tag>/<image>.tar
+#         bundle-url: https://github.com/<owner>/<repo>/releases/download/<tag>/<image>.tar.sigstore.json
+#         endpoint: ${{ vars.DEPLOY_ENDPOINT }}
+#         audience: ${{ vars.DEPLOY_AUDIENCE }}
+#         environment: production
+#
+# The job runs in the calling repository's environment `inputs.environment` (a job that calls
+# a reusable workflow cannot name an environment itself, so the called job does). The token's
+# `environment` claim exists only for a job of that environment, so the environment's rules (in
+# particular its deployment branches) belong to the calling repository; the proxy and the
+# updater check the claims (repository, repository id, this workflow at its pinned commit, ref,
+# environment, runner) and the updater checks the release's attestation. The caller's
+# workflow must run on its signing branch (a push to it, or a `workflow_run` of its release
+# workflow there), not on a `release` event, because the token's `ref` claim is the triggering
+# ref.
+#
+# Steps: an optional join of a Tailscale network (when `tailscale-oauth-client-id` is set),
+# then the deploy client `dsu-deploy` (crates/dsu-deploy), built from this workflow's own
+# commit (`job.workflow_repository` at `job.workflow_sha`), so a caller pinned to a commit runs
+# exactly that commit's client. It asks GitHub for a new OIDC token with `audience` for every
+# request, sends Deploy, then Status every 10 s until a final state or `wait-minutes` (0: no
+# limit), retrying a 503 or a connection failure. `converged` passes; any other final state
+# fails the job with the record's error; the wait running out fails it with "deploy <id> still
+# running; it continues".
+name: deploy
+
+on:
+  workflow_call:
+    inputs:
+      service:
+        description: The configured service to deploy (the {service} of the updater's API)
+        type: string
+        required: true
+      version:
+        description: The release version, for the deploy record and the log (at most 128 bytes)
+        type: string
+        required: true
+      image-digest:
+        description: The image's manifest digest, sha256:<64 hex> (the one entry of the tar's index.json)
+        type: string
+        required: true
+      image-url:
+        description: The release URL of the image tar
+        type: string
+        required: true
+      bundle-url:
+        description: The release URL of the image tar's Sigstore bundle
+        type: string
+        required: true
+      signer-repository:
+        description: The repository whose workflow signed the release; empty means the calling repository
+        type: string
+        default: ""
+      signer-workflow:
+        description: The path of the signing workflow
+        type: string
+        default: .github/workflows/artifacts.yml
+      signer-ref:
+        description: The ref the signing workflow ran on
+        type: string
+        default: refs/heads/main
+      endpoint:
+        description: The deploy front, http[s]://host[:port]
+        type: string
+        required: true
+      audience:
+        description: The audience every OIDC token is minted for (the proxy's configured audience)
+        type: string
+        required: true
+      environment:
+        description: The calling repository's environment the deploy job runs in
+        type: string
+        required: true
+      wait-minutes:
+        description: Minutes to wait for the deploy's final state; 0 waits however long it takes
+        type: number
+        default: 60
+      tailscale-oauth-client-id:
+        description: A Tailscale workload-identity client id; when set, the job joins that tailnet as an ephemeral node before any request
+        type: string
+        default: ""
+      tailscale-audience:
+        description: The audience of that Tailscale workload-identity client
+        type: string
+        default: ""
+      tailscale-tags:
+        description: The tags the job's tailnet node takes, comma-separated
+        type: string
+        default: ""
+
+permissions: {}
+
+jobs:
+  deploy:
+    name: deploy ${{ inputs.service }}
+    runs-on: ubuntu-24.04
+    environment: ${{ inputs.environment }}
+    permissions:
+      id-token: write
+    # One deploy per service at a time from a calling repository; a newer release waiting here
+    # replaces an older one that has not started.
+    concurrency:
+      group: docker-swarm-updater-deploy-${{ inputs.service }}
+      cancel-in-progress: false
+    steps:
+      - name: Refuse a runner that does not name this workflow's own commit
+        if: ${{ job.workflow_repository == '' || job.workflow_sha == '' }}
+        run: echo "::error::this runner does not set job.workflow_repository and job.workflow_sha, so the deploy client cannot be built from this workflow's commit" && exit 1
+      # Tailscale is fetched by version and checked against its SHA-256 (linux amd64, the
+      # runner above), never taken from a cache.
+      - name: Join the tailnet
+        if: ${{ inputs.tailscale-oauth-client-id != '' }}
+        uses: tailscale/github-action@99a8333667fff04fdd6cffb46dfd409f8329a7bf # v4.3.0
+        with:
+          oauth-client-id: ${{ inputs.tailscale-oauth-client-id }}
+          audience: ${{ inputs.tailscale-audience }}
+          tags: ${{ inputs.tailscale-tags }}
+          version: 1.104.2
+          sha256sum: 512f613ed7d04fc7282f7dc5bd76aa105aae28168fbb9357eb749ebcbc29f0ae
+          use-cache: "false"
+      - name: Check out this workflow's commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ job.workflow_repository }}
+          ref: ${{ job.workflow_sha }}
+          path: .docker-swarm-updater
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain
+        working-directory: .docker-swarm-updater
+        run: rustup toolchain install
+      - name: Build the deploy client
+        working-directory: .docker-swarm-updater
+        run: cargo build --locked -p dsu-deploy
+      - name: Deploy
+        working-directory: .docker-swarm-updater
+        env:
+          ENDPOINT: ${{ inputs.endpoint }}
+          SERVICE: ${{ inputs.service }}
+          IMAGE_DIGEST: ${{ inputs.image-digest }}
+          IMAGE_URL: ${{ inputs.image-url }}
+          BUNDLE_URL: ${{ inputs.bundle-url }}
+          SIGNER_REPOSITORY: ${{ inputs.signer-repository || github.repository }}
+          SIGNER_WORKFLOW: ${{ inputs.signer-workflow }}
+          SIGNER_REF: ${{ inputs.signer-ref }}
+          VERSION: ${{ inputs.version }}
+          AUDIENCE: ${{ inputs.audience }}
+          WAIT_MINUTES: ${{ inputs.wait-minutes }}
+        # Inputs reach the client as quoted flags, never as text spliced into the script.
+        # ACTIONS_ID_TOKEN_REQUEST_URL and ACTIONS_ID_TOKEN_REQUEST_TOKEN are set by GitHub for
+        # a job with `id-token: write`; the client reads the token from the environment.
+        run: >-
+          target/debug/dsu-deploy
+          --endpoint "$ENDPOINT"
+          --service "$SERVICE"
+          --image-digest "$IMAGE_DIGEST"
+          --image-url "$IMAGE_URL"
+          --bundle-url "$BUNDLE_URL"
+          --signer-repository "$SIGNER_REPOSITORY"
+          --signer-workflow "$SIGNER_WORKFLOW"
+          --signer-ref "$SIGNER_REF"
+          --version "$VERSION"
+          --audience "$AUDIENCE"
+          --id-token-url "$ACTIONS_ID_TOKEN_REQUEST_URL"
+          --wait-minutes "$WAIT_MINUTES"
