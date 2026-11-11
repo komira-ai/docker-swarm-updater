@@ -1,7 +1,12 @@
 //! `cargo xtask fetch --url <https url> [--url <https url> ...] --sha256 <64 hex> --out <path>
-//! [--member <path>]`: downloads a file pinned by SHA-256 from the first of its URLs that serves
-//! it. Every `--url` names the same file; they are tried in the order given. In this order:
+//! [--member <path> | --reuse]`: downloads a file pinned by SHA-256 from the first of its URLs
+//! that serves it. Every `--url` names the same file; they are tried in the order given. In this
+//! order:
 //!
+//! - With `--reuse` (a file restored from a cache), an existing `--out` is read and its SHA-256
+//!   compared with `--sha256`: when they are equal it is kept and nothing is downloaded; when
+//!   they differ the fetch fails and `--out` is left as it was. `--reuse` takes the pinned file
+//!   itself, so it cannot be combined with `--member`.
 //! - Each URL is downloaded whole over HTTPS (at most [`MAX_REDIRECTS`] redirects, each to an
 //!   `https` URL, any status outside 2xx an error, at most [`MAX_BYTES`] bytes). A transient
 //!   failure (the name does not resolve, the connection fails, is cut or times out, a 5xx) is
@@ -40,7 +45,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// The pauses before the second and the third attempt of one URL after a transient failure.
 const BACKOFF: [Duration; 2] = [Duration::from_secs(5), Duration::from_secs(20)];
 
-const USAGE: &str = "usage: xtask fetch --url <https url> [--url <https url> ...] --sha256 <64 hex> --out <path> [--member <path>]";
+const USAGE: &str = "usage: xtask fetch --url <https url> [--url <https url> ...] --sha256 <64 hex> --out <path> [--member <path> | --reuse]";
 
 /// Parsed command-line options of `fetch`.
 #[derive(Debug, PartialEq)]
@@ -50,6 +55,8 @@ pub(crate) struct Options {
     sha256: String,
     out: PathBuf,
     member: Option<String>,
+    /// An existing `out` holding the pinned file is kept instead of downloaded again.
+    reuse: bool,
 }
 
 /// Why one attempt to download a URL failed.
@@ -72,7 +79,12 @@ impl Failure {
 fn parse_args(args: &[String]) -> Result<Options, String> {
     let mut it = args.iter();
     let (mut urls, mut sha256, mut out, mut member) = (Vec::new(), None, None, None);
+    let mut reuse = false;
     while let Some(flag) = it.next() {
+        if flag == "--reuse" {
+            reuse = true;
+            continue;
+        }
         let value = it.next().ok_or_else(|| format!("{flag} needs a value"))?;
         match flag.as_str() {
             "--url" => urls.push(value.clone()),
@@ -88,11 +100,15 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
     if sha256.len() != 64 || !sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("--sha256 must be 64 hex digits".into());
     }
+    if reuse && member.is_some() {
+        return Err("--reuse keeps the pinned file itself and cannot take --member".into());
+    }
     Ok(Options {
         urls,
         sha256,
         out,
         member,
+        reuse,
     })
 }
 
@@ -120,12 +136,19 @@ fn run_with(
 
 /// Gets `opts` with `get`, verifies, unpacks and installs it, and returns what it did, one
 /// line per failed attempt and a last line naming the URL that served the file. `pause` is
-/// called with each pause of [`BACKOFF`] before a URL is tried again.
+/// called with each pause of [`BACKOFF`] before a URL is tried again. With `opts.reuse`, an
+/// existing `out` that is the pinned file is kept and `get` is never called.
 pub(crate) fn fetch(
     opts: &Options,
     get: &mut dyn FnMut(&str) -> Result<Vec<u8>, Failure>,
     pause: &mut dyn FnMut(Duration),
 ) -> Result<String, String> {
+    if opts.reuse && reusable(opts)? {
+        return Ok(format!(
+            "fetch: kept {}, its sha256 is the pinned one\n",
+            opts.out.display()
+        ));
+    }
     let mut log = String::new();
     let mut served = None;
     'urls: for url in &opts.urls {
@@ -174,6 +197,27 @@ pub(crate) fn fetch(
     install(&bytes, &opts.out)?;
     let _ = writeln!(log, "fetch: wrote {} from {url}", opts.out.display());
     Ok(log)
+}
+
+/// Whether `opts.out` exists and is the pinned file. An `out` that exists with another SHA-256,
+/// or cannot be read, is an error: a cache entry keyed by the pin never holds other bytes, so
+/// such an entry is reported rather than silently replaced.
+fn reusable(opts: &Options) -> Result<bool, String> {
+    let out = &opts.out;
+    let bytes = match std::fs::read(out) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(format!("reading {}: {e}", out.display())),
+    };
+    let digest = hex::encode(Sha256::digest(&bytes));
+    if digest != opts.sha256 {
+        return Err(format!(
+            "sha256 mismatch for the existing {}: expected {}, got {digest}; it was not replaced",
+            out.display(),
+            opts.sha256
+        ));
+    }
+    Ok(true)
 }
 
 /// The HTTPS-only client trusting `roots`; it follows no redirect itself.

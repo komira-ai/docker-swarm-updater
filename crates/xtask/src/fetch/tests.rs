@@ -205,6 +205,7 @@ fn opts(path: &str, sha256: String, out: &Path, member: Option<&str>) -> Options
         sha256,
         out: out.to_path_buf(),
         member: member.map(str::to_owned),
+        reuse: false,
     }
 }
 
@@ -289,6 +290,7 @@ fn scripted(urls: &[&str], out: &Path) -> Options {
         sha256: sha(FILE),
         out: out.to_path_buf(),
         member: None,
+        reuse: false,
     }
 }
 
@@ -423,6 +425,93 @@ fn when_every_url_fails_the_error_lists_each_attempt_and_nothing_is_written() {
 fn a_url_is_tried_at_most_three_times_5s_then_20s_apart() {
     // The other tests compare pauses with `BACKOFF`; this pins its values.
     assert_eq!(BACKOFF, [Duration::from_secs(5), Duration::from_secs(20)]);
+}
+
+// `--reuse`: a file restored from a cache, checked against the pin before anything is fetched.
+
+fn reusing(out: &Path) -> Options {
+    Options {
+        reuse: true,
+        ..scripted(&[A], out)
+    }
+}
+
+#[test]
+fn reuse_keeps_an_existing_pinned_file_and_asks_no_url() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("f.deb");
+    std::fs::write(&out, FILE).unwrap();
+    // A has no answer: asking it would fail the test.
+    let mut script = Script::new(&[(A, vec![])]);
+    let log = script.fetch(&reusing(&out)).unwrap();
+    assert_eq!(
+        log,
+        format!(
+            "fetch: kept {}, its sha256 is the pinned one\n",
+            out.display()
+        )
+    );
+    assert_eq!(script.calls, Vec::<String>::new());
+    assert_eq!(std::fs::read(&out).unwrap(), FILE);
+    assert_untouched(dir.path(), &["f.deb"]);
+}
+
+#[test]
+fn reuse_with_no_existing_file_fetches_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("f.deb");
+    let mut script = Script::new(&[(A, vec![Ok(FILE.to_vec())])]);
+    let log = script.fetch(&reusing(&out)).unwrap();
+    assert_eq!(log, format!("fetch: wrote {} from {A}\n", out.display()));
+    assert_eq!(script.calls, [A]);
+    assert_eq!(std::fs::read(&out).unwrap(), FILE);
+}
+
+#[test]
+fn reuse_refuses_an_existing_file_with_another_sha256_and_leaves_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("f.deb");
+    std::fs::write(&out, "other").unwrap();
+    let mut script = Script::new(&[(A, vec![])]);
+    let err = script.fetch(&reusing(&out)).unwrap_err();
+    assert_eq!(
+        err,
+        format!(
+            "sha256 mismatch for the existing {}: expected {}, got {}; it was not replaced",
+            out.display(),
+            sha(FILE),
+            sha(b"other")
+        )
+    );
+    assert_eq!(script.calls, Vec::<String>::new());
+    assert_eq!(std::fs::read_to_string(&out).unwrap(), "other");
+    assert_untouched(dir.path(), &["f.deb"]);
+}
+
+#[test]
+fn reuse_refuses_an_existing_out_it_cannot_read() {
+    let dir = tempfile::tempdir().unwrap();
+    // `out` is a directory.
+    let out = dir.path().join("f.deb");
+    std::fs::create_dir(&out).unwrap();
+    let mut script = Script::new(&[(A, vec![])]);
+    let err = script.fetch(&reusing(&out)).unwrap_err();
+    assert!(
+        err.starts_with(&format!("reading {}: ", out.display())),
+        "{err}"
+    );
+    assert_eq!(script.calls, Vec::<String>::new());
+}
+
+#[test]
+fn without_reuse_an_existing_pinned_file_is_fetched_again_and_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("f.deb");
+    std::fs::write(&out, FILE).unwrap();
+    let mut script = Script::new(&[(A, vec![Ok(FILE.to_vec())])]);
+    script.fetch(&scripted(&[A], &out)).unwrap();
+    assert_eq!(script.calls, [A]);
+    assert_untouched(dir.path(), &["f.deb"]);
 }
 
 // Which failures of a request are transient.
@@ -713,7 +802,8 @@ fn the_command_line_needs_a_url_sha256_and_out_and_keeps_the_urls_in_order() {
             urls: vec!["https://h/x".into(), "https://g/x".into()],
             sha256: hex.clone(),
             out: "o".into(),
-            member: Some("m".into())
+            member: Some("m".into()),
+            reuse: false,
         }
     );
     assert_eq!(
@@ -730,6 +820,19 @@ fn the_command_line_needs_a_url_sha256_and_out_and_keeps_the_urls_in_order() {
     ] {
         assert_eq!(parse_args(&args).unwrap_err(), USAGE);
     }
+    let o = parse_args(&s(&[
+        "--reuse", "--url", "u", "--sha256", &hex, "--out", "o",
+    ]))
+    .unwrap();
+    assert!(o.reuse);
+    assert_eq!(o.urls, ["u"]);
+    assert_eq!(
+        parse_args(&s(&[
+            "--url", "u", "--sha256", &hex, "--out", "o", "--member", "m", "--reuse"
+        ]))
+        .unwrap_err(),
+        "--reuse keeps the pinned file itself and cannot take --member"
+    );
     assert_eq!(
         parse_args(&s(&["--url"])).unwrap_err(),
         "--url needs a value"

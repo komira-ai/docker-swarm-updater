@@ -87,6 +87,10 @@ jobs:
         # Each .deb is the same file at every URL `Fetch musl*` names: Launchpad, the archive
         # pool of the platform (ports for arm64), a fixed snapshot of that pool, and a mirror
         # outside Canonical's names. They are tried in that order; the SHA-256 is one pin.
+        # Once fetched, each .deb is kept in this repository's GitHub Actions cache under its
+        # name and SHA-256, so a later release needs none of those hosts: the cached file is
+        # restored first, checked against the same pin (a mismatch fails the step), and only a
+        # miss is fetched and then saved.
         include:
           - platform: linux-x86_64
             runner: ubuntu-24.04
@@ -132,27 +136,63 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install
       - run: rustup target add "$TARGET"
-      - name: Fetch musl
+      - name: Restore musl from the cache
+        id: cache-musl
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/musl.deb
+          key: deb-musl_${{ env.MUSL_VERSION }}_${{ matrix.deb-arch }}.deb-${{ matrix.musl-sha256 }}
+      - name: Fetch musl unless the cache had it
         env:
           SHA256: ${{ matrix.musl-sha256 }}
           DEB: musl_${{ env.MUSL_VERSION }}_${{ matrix.deb-arch }}.deb
         run: >-
-          cargo xtask fetch --sha256 "$SHA256" --out "$RUNNER_TEMP/musl.deb"
+          cargo xtask fetch --reuse --sha256 "$SHA256" --out "$RUNNER_TEMP/musl.deb"
           --url "$LAUNCHPAD/$DEB" --url "$ARCHIVE/$POOL/$DEB" --url "$SNAPSHOT/$POOL/$DEB" --url "$MIRROR/$POOL/$DEB"
-      - name: Fetch musl-dev
+      - name: Save musl to the cache
+        if: ${{ steps.cache-musl.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/musl.deb
+          key: ${{ steps.cache-musl.outputs.cache-primary-key }}
+      - name: Restore musl-dev from the cache
+        id: cache-musl-dev
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/musl-dev.deb
+          key: deb-musl-dev_${{ env.MUSL_VERSION }}_${{ matrix.deb-arch }}.deb-${{ matrix.musl-dev-sha256 }}
+      - name: Fetch musl-dev unless the cache had it
         env:
           SHA256: ${{ matrix.musl-dev-sha256 }}
           DEB: musl-dev_${{ env.MUSL_VERSION }}_${{ matrix.deb-arch }}.deb
         run: >-
-          cargo xtask fetch --sha256 "$SHA256" --out "$RUNNER_TEMP/musl-dev.deb"
+          cargo xtask fetch --reuse --sha256 "$SHA256" --out "$RUNNER_TEMP/musl-dev.deb"
           --url "$LAUNCHPAD/$DEB" --url "$ARCHIVE/$POOL/$DEB" --url "$SNAPSHOT/$POOL/$DEB" --url "$MIRROR/$POOL/$DEB"
-      - name: Fetch musl-tools
+      - name: Save musl-dev to the cache
+        if: ${{ steps.cache-musl-dev.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/musl-dev.deb
+          key: ${{ steps.cache-musl-dev.outputs.cache-primary-key }}
+      - name: Restore musl-tools from the cache
+        id: cache-musl-tools
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/musl-tools.deb
+          key: deb-musl-tools_${{ env.MUSL_VERSION }}_${{ matrix.deb-arch }}.deb-${{ matrix.musl-tools-sha256 }}
+      - name: Fetch musl-tools unless the cache had it
         env:
           SHA256: ${{ matrix.musl-tools-sha256 }}
           DEB: musl-tools_${{ env.MUSL_VERSION }}_${{ matrix.deb-arch }}.deb
         run: >-
-          cargo xtask fetch --sha256 "$SHA256" --out "$RUNNER_TEMP/musl-tools.deb"
+          cargo xtask fetch --reuse --sha256 "$SHA256" --out "$RUNNER_TEMP/musl-tools.deb"
           --url "$LAUNCHPAD/$DEB" --url "$ARCHIVE/$POOL/$DEB" --url "$SNAPSHOT/$POOL/$DEB" --url "$MIRROR/$POOL/$DEB"
+      - name: Save musl-tools to the cache
+        if: ${{ steps.cache-musl-tools.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/musl-tools.deb
+          key: ${{ steps.cache-musl-tools.outputs.cache-primary-key }}
       - name: Install musl
         run: sudo dpkg --install "$RUNNER_TEMP/musl.deb" "$RUNNER_TEMP/musl-dev.deb" "$RUNNER_TEMP/musl-tools.deb"
       # aws-lc-sys compiles C for the musl target with the compiler named after the target's
