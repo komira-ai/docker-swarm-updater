@@ -1,0 +1,332 @@
+# The release of docker-swarm-updater (docs/design.md section 7), made by each push to main
+# unless a newer push supersedes it before it starts. For linux-x86_64 and linux-arm64: the static
+# binary `docker-swarm-updater-<version>-<platform>`
+# and its container image `docker-swarm-updater-<version>-<platform>.image.tar` (an OCI image
+# layout, FROM scratch, the binary alone; crates/xtask/src/release/image.rs), each with its own
+# provenance attestation bundle `<file>.sigstore.json`, and one SHA256SUMS over the four files.
+# The release is published as `v<version>` at the pushed commit. No step needs a person.
+#
+# The version is `<major>.<minor>.<commits on main>`: the same commit always gets the same
+# version, and a later commit a higher one (`cargo xtask release version`).
+#
+# Every build is checked before anything is signed: the binary has no program interpreter and
+# prints the version; rebuilding the workspace's own crates gives the same binary byte for byte;
+# the image, written twice, is the same bytes twice; and the image loads into Docker and its
+# entrypoint prints the version.
+#
+# THIS FILE IS THE SIGNER IDENTITY. An attestation's signer is the workflow file that ran the
+# signing step, on its ref: `komira-ai/docker-swarm-updater/.github/workflows/artifacts.yml` on
+# `refs/heads/main`, started by `push`. The updater's config for its own service, and anyone
+# who verifies a release, names exactly that, so this file is never renamed or moved.
+#
+# Only `attest` holds `id-token: write` and `attestations: write`. While it holds them no
+# repository code runs and nothing is built: pinned actions, two `sha256sum --check` and a `cp`
+# per bundle. The files reach it through the run's artifact store, where a job that ran
+# repository code could have replaced them, so it first refuses sums other than the ones
+# `sums` made (their SHA-256 is a job output), then files that differ from the sums. `verify`
+# then checks each file against its own bundle and signer before `publish` (the one job with
+# `contents: write`) creates the release.
+name: artifacts
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+# Releases are made one at a time, in push order; a newer push waiting here replaces an older
+# one that has not started (the newer release supersedes it).
+concurrency:
+  group: artifacts
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  COMMIT: ${{ github.sha }}
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          fetch-depth: 0
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Count the commits on main up to the pushed one
+        run: git rev-list --count "$COMMIT" > "$RUNNER_TEMP/commit-count"
+      - name: The release version
+        id: version
+        run: cargo xtask release version --commit-count-file "$RUNNER_TEMP/commit-count" --github-output "$GITHUB_OUTPUT"
+
+  build:
+    name: build ${{ matrix.platform }}
+    needs: [plan]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: true
+      matrix:
+        # Each platform builds natively on a hosted runner of its architecture, so every check
+        # below runs the binary and the image on the kind of host they are for.
+        # musl's C toolchain (musl-gcc and the musl headers and libraries) comes from Ubuntu
+        # 24.04's own packages, fetched by URL and checked by SHA-256 before it is installed.
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            oci-platform: linux/amd64
+            musl-cc: x86_64-linux-musl-gcc
+            deb-arch: amd64
+            musl-sha256: 9f0883c20b4b746e05e947bafd99cb933f5494ffaaa6fcd360cbe1fbcf264883
+            musl-dev-sha256: 4b451ecb6a0f8469883058cf22a807f3bd9cc16d115cc08b7efc35fe8eb44db2
+            musl-tools-sha256: 46c01d212d3eb3a1322693089037f0a5c92383a089d39c392db3c86c19ffb229
+          - platform: linux-arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            oci-platform: linux/arm64
+            musl-cc: aarch64-linux-musl-gcc
+            deb-arch: arm64
+            musl-sha256: 79a04df7e8f54c74720ad474c04966204c03370654f4a43bec2968e80821e39f
+            musl-dev-sha256: 56e4fa8e6fcd2825ca9e262e8807d2038d4a0e91274bd51fce1653b219f5ae92
+            musl-tools-sha256: 0ecd1f97fd8cf6727d492c6a7515e44a5a905f5af123fc90f35f954cabc50d60
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+      PLATFORM: ${{ matrix.platform }}
+      TARGET: ${{ matrix.target }}
+      OCI_PLATFORM: ${{ matrix.oci-platform }}
+      MUSL_CC: ${{ matrix.musl-cc }}
+      DEB_ARCH: ${{ matrix.deb-arch }}
+      MUSL_VERSION: 1.2.4-2
+      DEBS: https://launchpad.net/ubuntu/+archive/primary/+files
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - run: rustup target add "$TARGET"
+      - name: Fetch musl
+        env:
+          SHA256: ${{ matrix.musl-sha256 }}
+        run: cargo xtask fetch --url "$DEBS/musl_${MUSL_VERSION}_$DEB_ARCH.deb" --sha256 "$SHA256" --out "$RUNNER_TEMP/musl.deb"
+      - name: Fetch musl-dev
+        env:
+          SHA256: ${{ matrix.musl-dev-sha256 }}
+        run: cargo xtask fetch --url "$DEBS/musl-dev_${MUSL_VERSION}_$DEB_ARCH.deb" --sha256 "$SHA256" --out "$RUNNER_TEMP/musl-dev.deb"
+      - name: Fetch musl-tools
+        env:
+          SHA256: ${{ matrix.musl-tools-sha256 }}
+        run: cargo xtask fetch --url "$DEBS/musl-tools_${MUSL_VERSION}_$DEB_ARCH.deb" --sha256 "$SHA256" --out "$RUNNER_TEMP/musl-tools.deb"
+      - name: Install musl
+        run: sudo dpkg --install "$RUNNER_TEMP/musl.deb" "$RUNNER_TEMP/musl-dev.deb" "$RUNNER_TEMP/musl-tools.deb"
+      # aws-lc-sys compiles C for the musl target with the compiler named after the target's
+      # triple; musl-tools installs it as `musl-gcc` only.
+      - name: Name musl-gcc as the target's C compiler
+        run: sudo ln -s /usr/bin/musl-gcc "/usr/local/bin/$MUSL_CC"
+      # The release version goes into this checkout only (Cargo.toml and Cargo.lock), so the
+      # binary prints it; the repository keeps its own version.
+      - name: Stamp the release version
+        run: cargo xtask release stamp --version "$VERSION"
+      - name: Build the static binary
+        run: cargo build --locked --release --target "$TARGET" -p docker-swarm-updater
+      - name: The binary is static
+        run: cargo xtask release check-static --binary "target/$TARGET/release/docker-swarm-updater"
+      - name: The binary prints the release version
+        run: cargo xtask release check-output --expect "docker-swarm-updater $VERSION" -- "target/$TARGET/release/docker-swarm-updater" --version
+      - name: Keep the first build of the binary
+        run: install -D --mode 0755 "target/$TARGET/release/docker-swarm-updater" "dist/docker-swarm-updater-$VERSION-$PLATFORM"
+      - name: Remove the build of the workspace's own crates
+        run: cargo clean --release --target "$TARGET" -p docker-swarm-updater -p dsu-server -p dsu-core -p dsu-verify -p dsu-docker -p dsu-registry
+      - name: Build the static binary again
+        run: cargo build --locked --release --target "$TARGET" -p docker-swarm-updater
+      - name: The two builds of the binary are the same bytes
+        run: cmp "dist/docker-swarm-updater-$VERSION-$PLATFORM" "target/$TARGET/release/docker-swarm-updater"
+      - name: The commit's time, the one time the image holds
+        id: created
+        run: git log -1 --format=seconds=%ct "$COMMIT" >> "$GITHUB_OUTPUT"
+      - name: Write the image, 1 of 2
+        env:
+          CREATED: ${{ steps.created.outputs.seconds }}
+        run: cargo xtask release image --binary "dist/docker-swarm-updater-$VERSION-$PLATFORM" --version "$VERSION" --commit "$COMMIT" --created "$CREATED" --platform "$OCI_PLATFORM" --out "$RUNNER_TEMP/image-1.tar"
+      - name: Write the image, 2 of 2
+        env:
+          CREATED: ${{ steps.created.outputs.seconds }}
+        run: cargo xtask release image --binary "target/$TARGET/release/docker-swarm-updater" --version "$VERSION" --commit "$COMMIT" --created "$CREATED" --platform "$OCI_PLATFORM" --out "$RUNNER_TEMP/image-2.tar"
+      - name: The two images are the same bytes
+        run: cmp "$RUNNER_TEMP/image-1.tar" "$RUNNER_TEMP/image-2.tar"
+      - name: Load the image
+        run: docker load --input "$RUNNER_TEMP/image-1.tar"
+      - name: The image's entrypoint prints the release version
+        run: cargo xtask release check-output --expect "docker-swarm-updater $VERSION" -- docker run --rm --network none "docker-swarm-updater:$VERSION" --version
+      - name: Name the image
+        run: cp "$RUNNER_TEMP/image-1.tar" "dist/docker-swarm-updater-$VERSION-$PLATFORM.image.tar"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: dist-${{ matrix.platform }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  # SHA256SUMS over exactly the four files, checked before anything is attested or published.
+  sums:
+    needs: [plan, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+    # The SHA-256 of the SHA256SUMS this job uploads: `attest` refuses sums other than these.
+    outputs:
+      sha256: ${{ steps.sums.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: dist-*
+          merge-multiple: true
+          path: dist
+      - name: Write SHA256SUMS over exactly the release's files
+        id: sums
+        run: cargo xtask release sums --dir dist --version "$VERSION" --github-output "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-assets
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  # The signing. See the top of this file.
+  attest:
+    needs: [plan, sums]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      V: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-assets
+          path: dist
+      - name: Refuse sums other than the build's
+        env:
+          SUMS_SHA256: ${{ needs.sums.outputs.sha256 }}
+        run: /usr/bin/sha256sum --check --strict <<< "$SUMS_SHA256  dist/SHA256SUMS"
+      - name: Refuse files that differ from the sums
+        working-directory: dist
+        run: /usr/bin/sha256sum --check --strict SHA256SUMS
+      - id: binary-linux-x86_64
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/docker-swarm-updater-${{ needs.plan.outputs.version }}-linux-x86_64
+      - name: Name the bundle of the linux-x86_64 binary
+        env:
+          BUNDLE: ${{ steps.binary-linux-x86_64.outputs.bundle-path }}
+        run: cp "$BUNDLE" "dist/docker-swarm-updater-$V-linux-x86_64.sigstore.json"
+      - id: image-linux-x86_64
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/docker-swarm-updater-${{ needs.plan.outputs.version }}-linux-x86_64.image.tar
+      - name: Name the bundle of the linux-x86_64 image
+        env:
+          BUNDLE: ${{ steps.image-linux-x86_64.outputs.bundle-path }}
+        run: cp "$BUNDLE" "dist/docker-swarm-updater-$V-linux-x86_64.image.tar.sigstore.json"
+      - id: binary-linux-arm64
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/docker-swarm-updater-${{ needs.plan.outputs.version }}-linux-arm64
+      - name: Name the bundle of the linux-arm64 binary
+        env:
+          BUNDLE: ${{ steps.binary-linux-arm64.outputs.bundle-path }}
+        run: cp "$BUNDLE" "dist/docker-swarm-updater-$V-linux-arm64.sigstore.json"
+      - id: image-linux-arm64
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: dist/docker-swarm-updater-${{ needs.plan.outputs.version }}-linux-arm64.image.tar
+      - name: Name the bundle of the linux-arm64 image
+        env:
+          BUNDLE: ${{ steps.image-linux-arm64.outputs.bundle-path }}
+        run: cp "$BUNDLE" "dist/docker-swarm-updater-$V-linux-arm64.image.tar.sigstore.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bundles
+          path: dist/*.sigstore.json
+          if-no-files-found: error
+          retention-days: 7
+
+  # Each file against its own bundle, with the checks a user or the updater makes: this file
+  # on refs/heads/main at the pushed commit, on a GitHub-hosted runner.
+  verify:
+    name: verify ${{ matrix.asset }}
+    needs: [plan, attest]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      attestations: read
+    strategy:
+      fail-fast: true
+      matrix:
+        asset: [linux-x86_64, linux-x86_64.image.tar, linux-arm64, linux-arm64.image.tar]
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-assets
+          path: dist
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bundles
+          path: dist
+      - name: Verify the file from its bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          FILE: dist/docker-swarm-updater-${{ needs.plan.outputs.version }}-${{ matrix.asset }}
+        run: gh attestation verify "$FILE" --bundle "$FILE.sigstore.json" --repo "$REPO" --signer-workflow "$REPO/.github/workflows/artifacts.yml" --source-ref refs/heads/main --source-digest "$COMMIT" --deny-self-hosted-runners
+
+  # The release `v<version>` at the pushed commit, with the four files, their bundles and
+  # SHA256SUMS. GitHub creates the tag; no person tags anything.
+  publish:
+    needs: [plan, verify]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-assets
+          path: dist
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: bundles
+          path: dist
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          VERSION: ${{ needs.plan.outputs.version }}
+        run: gh release create "v$VERSION" dist/* --repo "$REPO" --target "$COMMIT" --title "docker-swarm-updater $VERSION" --notes "Built from $COMMIT by .github/workflows/artifacts.yml. Each file has its provenance bundle beside it as <file>.sigstore.json; SHA256SUMS lists the four files."

@@ -387,6 +387,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dsu-deploy"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "dsu-core",
+ "rustls",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "thiserror",
+ "ureq",
+ "url",
+]
+
+[[package]]
 name = "dsu-docker"
 version = "0.1.0"
 dependencies = [
@@ -1338,6 +1353,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "ryu"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
 name = "ryu-js"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1404,6 +1425,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9c187e0a369471c550af028cba56d4f4fa2a489ad28151ae95a4d340a2a8b782"
 dependencies = [
  "serde_core",
+]
+
+[[package]]
+name = "serde_yaml_ng"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b4db627b98b36d4203a7b458cf3573730f2bb591b28871d916dfa9efabfd41f"
+dependencies = [
+ "indexmap",
+ "itoa",
+ "ryu",
+ "serde",
+ "unsafe-libyaml",
 ]
 
 [[package]]
@@ -1922,6 +1956,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
 
 [[package]]
+name = "unsafe-libyaml"
+version = "0.2.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "673aac59facbab8a9007c7f6108d11f63b603f7cabff99fabf650fea5c32b861"
+
+[[package]]
 name = "untrusted"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2166,12 +2206,19 @@ dependencies = [
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "dsu-core",
+ "dsu-server",
+ "dsu-testkit",
+ "dsu-verify",
  "flate2",
  "hex",
+ "jiff",
  "rcgen",
  "rustls",
  "rustls-pki-types",
  "serde",
+ "serde_json",
+ "serde_yaml_ng",
  "sha2",
  "tar",
  "tempfile",

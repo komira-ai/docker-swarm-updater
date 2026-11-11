@@ -1,0 +1,11 @@
+# actionlint's configuration. One narrow exception, in one file:
+#
+# deploy.yml reads `job.workflow_repository` and `job.workflow_sha`, the repository and commit of
+# the workflow file that defines the running job (GitHub's contexts reference, `job` context),
+# to build its deploy client from its own commit. actionlint's model of the `job` context does
+# not have these two properties yet, so it reports them as undefined. Only that message, for
+# only those two names, in only that file, is ignored; every other check still runs.
+paths:
+  .github/workflows/deploy.yml:
+    ignore:
+      - 'property "workflow_(repository|sha)" is not defined in object type'
