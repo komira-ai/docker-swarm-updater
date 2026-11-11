@@ -15,6 +15,7 @@ use tokio::task::JoinSet;
 use crate::clock::Clock;
 use crate::deployer::Deployer;
 use crate::fetch::{Disk, Fetcher};
+use crate::log::Log;
 use crate::net::Network;
 use crate::peer::PeerCred;
 use crate::startup::StartError;
@@ -38,8 +39,10 @@ pub struct Params {
     pub hostname: String,
     /// The clock.
     pub clock: Arc<dyn Clock>,
-    /// How the uid of a connection's peer is read.
+    /// How the credentials of a connection's peer are read.
     pub peer_cred: Arc<dyn PeerCred>,
+    /// Where refused requests are logged.
+    pub log: Log,
     /// Name resolution and TCP connections of downloads.
     pub network: Arc<dyn Network>,
     /// The disk downloads are written to.
@@ -56,8 +59,10 @@ pub struct App {
     pub roots: Arc<TrustedRoots>,
     /// The clock.
     pub clock: Arc<dyn Clock>,
-    /// How the uid of a connection's peer is read.
+    /// How the credentials of a connection's peer are read.
     pub peer_cred: Arc<dyn PeerCred>,
+    /// Where refused requests are logged.
+    pub log: Log,
     /// The Docker Engine API.
     pub docker: DockerClient,
     /// The registry the updater pushes to.
@@ -98,6 +103,7 @@ impl App {
             roots: Arc::new(params.roots),
             clock: params.clock,
             peer_cred: params.peer_cred,
+            log: params.log,
             docker,
             registry,
             store,

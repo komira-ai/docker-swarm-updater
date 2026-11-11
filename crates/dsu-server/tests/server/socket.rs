@@ -5,7 +5,7 @@ use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _}
 use std::os::unix::net::UnixStream as StdStream;
 
 use dsu_server::cli::{ServeArgs, serve};
-use dsu_server::peer::{PeerCred, SystemPeerCred};
+use dsu_server::peer::{Credentials, PeerCred, SystemPeerCred};
 use dsu_server::server::{Shutdown, bind_socket};
 use dsu_server::startup::StartError;
 use tokio::sync::oneshot;
@@ -101,17 +101,44 @@ async fn socket_failures_name_the_flag() {
     assert!(error.to_string().contains("bind"), "{error}");
 }
 
+/// The real read, from both ends of a connection in this process.
 #[tokio::test]
-async fn the_peer_uid_is_the_kernels() {
+async fn the_peer_credentials_are_the_kernels() {
     let dir = tempfile::tempdir().unwrap();
     let listener = tokio::net::UnixListener::bind(dir.path().join("s")).unwrap();
     let client = tokio::net::UnixStream::connect(dir.path().join("s"))
         .await
         .unwrap();
     let (server, _) = listener.accept().await.unwrap();
-    let mine = rustix::process::geteuid().as_raw();
-    assert_eq!(SystemPeerCred.uid(&server).unwrap(), mine);
-    assert_eq!(SystemPeerCred.uid(&client).unwrap(), mine);
+    let mine = Credentials {
+        pid: rustix::process::getpid().as_raw_nonzero().get(),
+        uid: rustix::process::geteuid().as_raw(),
+        gid: rustix::process::getegid().as_raw(),
+    };
+    assert_eq!(SystemPeerCred.credentials(&server).unwrap(), mine);
+    assert_eq!(SystemPeerCred.credentials(&client).unwrap(), mine);
+}
+
+/// The kernel's pid 0, through the real read. A client outside the updater's pid namespace (root
+/// on the host of the updater's container) is reported with pid 0; so is the peer of a Unix
+/// socket that never connected, with uid and gid -1, which this test can make without privileges
+/// or a second namespace. The earlier rustix-based read could not represent pid 0 and failed here,
+/// which dropped the host's client.
+#[tokio::test]
+async fn a_pid_0_answer_from_the_kernel_is_read() {
+    use rustix::net::{AddressFamily, SocketType, socket};
+    let fd = socket(AddressFamily::UNIX, SocketType::STREAM, None).unwrap();
+    let unconnected = std::os::unix::net::UnixStream::from(fd);
+    unconnected.set_nonblocking(true).unwrap();
+    let unconnected = tokio::net::UnixStream::from_std(unconnected).unwrap();
+    assert_eq!(
+        SystemPeerCred.credentials(&unconnected).unwrap(),
+        Credentials {
+            pid: 0,
+            uid: u32::MAX,
+            gid: u32::MAX,
+        }
+    );
 }
 
 #[tokio::test]

@@ -7,6 +7,7 @@ pub mod clock;
 pub mod deployer;
 pub mod fetch;
 pub mod handlers;
+pub mod log;
 pub mod net;
 pub mod peer;
 pub mod pipeline;

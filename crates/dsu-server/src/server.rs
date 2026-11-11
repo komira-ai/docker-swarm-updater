@@ -1,6 +1,7 @@
 //! The HTTP server on a Unix socket (docs/design.md sections 1 and 2): the socket and its
-//! directory with their modes, one task per connection, the uid of each connection's peer,
-//! and the dispatch of each request through the route, peer and claims checks to its handler.
+//! directory with their modes, one task per connection, the credentials of each connection's
+//! peer, the dispatch of each request through the route, peer and claims checks to its
+//! handler, and a log line for each request refused 401 or 403.
 
 use std::convert::Infallible;
 use std::future::Future;
@@ -30,6 +31,7 @@ use tokio::task::JoinSet;
 use crate::app::App;
 use crate::auth::authenticate;
 use crate::handlers::{self, Reply};
+use crate::peer::Credentials;
 use crate::startup::StartError;
 
 /// How long a connection may take to send a request head, or sit idle between requests.
@@ -77,10 +79,13 @@ fn response(status: StatusCode, body: Vec<u8>) -> Response<Full<Bytes>> {
     response
 }
 
-/// Routes and answers one request from a peer with uid `peer_uid`.
+/// The peer of a connection: the kernel's credentials, or why they cannot be read.
+type Peer = Result<Credentials, String>;
+
+/// Routes and answers one request from `peer`.
 async fn respond(
     app: &Arc<App>,
-    peer_uid: u32,
+    peer: &Peer,
     parts: &Parts,
     body: Incoming,
 ) -> Result<Reply, Failure> {
@@ -91,6 +96,7 @@ async fn respond(
         .filter(|_| origin_form)
         .map_or(&b""[..], |p| p.as_str().as_bytes());
     let route = route(parts.method.as_str(), target)?;
+    let peer_uid = peer.as_ref().map(|c| c.uid).map_err(String::as_str);
     let auth = authenticate(app, peer_uid, route == Route::Health, &parts.headers).await?;
     Ok(match route {
         Route::Deploy { service } => handlers::deploy(app, &auth, &service, body).await?,
@@ -103,15 +109,32 @@ async fn respond(
     })
 }
 
+/// The log line of a request refused 401 or 403: what was asked, the answer, and the peer.
+fn refusal_line(peer: &Peer, parts: &Parts, error: &ApiError) -> String {
+    let peer = match peer {
+        Ok(credentials) => credentials.to_string(),
+        Err(_) => "with unreadable credentials".to_owned(),
+    };
+    format!(
+        "refused {} {} from peer {peer}: {} {error}",
+        parts.method,
+        parts.uri.path(),
+        error.status()
+    )
+}
+
 async fn handle(
     app: Arc<App>,
-    peer_uid: u32,
+    peer: Peer,
     request: Request<Incoming>,
 ) -> Result<Response<Full<Bytes>>, Infallible> {
     let (parts, body) = request.into_parts();
-    Ok(match respond(&app, peer_uid, &parts, body).await {
+    Ok(match respond(&app, &peer, &parts, body).await {
         Ok(reply) => response(reply.status, reply.body),
         Err(failure) => {
+            if matches!(failure.error.status(), 401 | 403) {
+                app.log.line(&refusal_line(&peer, &parts, &failure.error));
+            }
             let status = StatusCode::from_u16(failure.error.status())
                 .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             let mut answer = response(status, failure.error.to_json().into_bytes());
@@ -125,13 +148,15 @@ async fn handle(
     })
 }
 
-/// Serves one connection until it ends. A connection whose peer uid cannot be read is
-/// dropped.
+/// Serves one connection until it ends. A connection whose peer's credentials cannot be read
+/// is served too: health is answered, every other request is refused 401 `bad_peer` with the
+/// reason, and logged.
 async fn connection(app: Arc<App>, stream: UnixStream) {
-    let Ok(peer_uid) = app.peer_cred.uid(&stream) else {
-        return;
-    };
-    let service = service_fn(move |request| handle(Arc::clone(&app), peer_uid, request));
+    let peer: Peer = app
+        .peer_cred
+        .credentials(&stream)
+        .map_err(|e| e.to_string());
+    let service = service_fn(move |request| handle(Arc::clone(&app), peer.clone(), request));
     let _ = http1::Builder::new()
         .timer(TokioTimer::new())
         .header_read_timeout(IDLE_TIMEOUT)

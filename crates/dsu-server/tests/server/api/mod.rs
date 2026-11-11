@@ -2,6 +2,7 @@
 //! docs/design.md section 6, the local operator, health and the failed list.
 
 mod admission;
+mod peer;
 mod status;
 
 use serde_json::json;
