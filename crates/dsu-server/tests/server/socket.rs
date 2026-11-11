@@ -101,6 +101,11 @@ async fn socket_failures_name_the_flag() {
     assert!(error.to_string().contains("bind"), "{error}");
 }
 
+/// The real read, from both ends of a connection in this process. The kernel's other answer, pid 0
+/// for a peer outside the updater's pid namespace, needs a second pid namespace, which takes
+/// privileges a hermetic test does not have; the API tests in `api::peer` feed the server those
+/// credentials (and an unreadable read, which is what the earlier rustix-based read gave for
+/// pid 0) through the fake peer.
 #[tokio::test]
 async fn the_peer_credentials_are_the_kernels() {
     let dir = tempfile::tempdir().unwrap();

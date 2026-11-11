@@ -360,7 +360,7 @@ check is `probe --unix <its socket> /v1/health`.
   `docker-swarm-updater` (the binary; `main.rs` forwards to `dsu-server`), `dsu-deploy` (the client the reusable workflow runs,
   section 7), `xtask` (repository checks and the release steps of section 7).
 - Each side effect is behind a narrow trait with a real implementation and the fake of section 6: `Docker`, `Registry`, `Fetch`
-  (including name resolution), `Clock`, `PeerCred` (the uid of a connection's peer). Errors are `thiserror` enums with context in every
+  (including name resolution), `Clock`, `PeerCred` (the credentials of a connection's peer; only the uid decides). Errors are `thiserror` enums with context in every
   library crate; `anyhow` only in the binary.
 - `tokio` and `hyper` (server on a Unix socket, clients for the Docker socket and HTTPS with `rustls`). No `unsafe`; `SO_PEERCRED`
   through tokio's `UnixStream::peer_cred` (rustix's `UCred` holds the pid as a non-zero integer, so it cannot hold the kernel's pid 0).
