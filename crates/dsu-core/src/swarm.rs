@@ -44,7 +44,8 @@ pub struct ServiceView {
 pub enum Verdict {
     /// Keep polling.
     Waiting,
-    /// The update completed and every running task runs the new image.
+    /// Swarm runs the new image on every running task: the update completed, or the spec
+    /// already named the image and no update is in flight.
     Converged,
     /// Swarm rolled the update back.
     RolledBack,
@@ -228,6 +229,7 @@ mod tests {
             ("completed", &[OLD][..], Verdict::Waiting),
             ("rollback_completed", &[OLD][..], Verdict::RolledBack),
             ("paused", &[OLD][..], Verdict::Paused),
+            ("paused", &[NEW][..], Verdict::Paused),
             ("rollback_paused", &[OLD][..], Verdict::Paused),
         ];
         for (state, tasks, want) in cases {
@@ -250,6 +252,14 @@ mod tests {
         // No start time.
         let v = view(11, Some(("completed", None)), OLD, OURS);
         assert_eq!(judged(&v, &[OLD]), Verdict::Waiting);
+        // Other terminal states, at or before the read time: counted, they would be
+        // `RolledBack` and `Paused`.
+        for state in ["rollback_completed", "paused", "rollback_paused"] {
+            for at in [Some(100), Some(50), None] {
+                let v = view(11, Some((state, at)), OLD, OURS);
+                assert_eq!(judged(&v, &[OLD]), Verdict::Waiting, "{state} {at:?}");
+            }
+        }
         // Both stale and the service is not carrying our label.
         let v = view(10, Some(("completed", Some(50))), OLD, Some("d-other"));
         assert_eq!(judged(&v, &[OLD]), Verdict::Interrupted);
@@ -292,6 +302,9 @@ mod tests {
                 }
             }
         }
+        // A status started exactly at the read time is not this update's either.
+        let v = view(11, Some(("completed", Some(100))), NEW, OURS);
+        assert_eq!(judged(&v, &[NEW]), Verdict::Converged);
         // The read the update is about to be asked from, judged against its own snapshot.
         let v = view(10, None, NEW, None);
         assert_eq!(judged(&v, &[NEW]), Verdict::Converged);

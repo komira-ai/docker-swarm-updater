@@ -5,7 +5,7 @@ use dsu_core::ids::{DeployId, ServiceName};
 use dsu_core::record::{ErrorToken, Phase, State};
 use dsu_core::swarm::Snapshot;
 use dsu_server::clock::Clock as _;
-use dsu_testkit::docker::{FakeTask, FakeUpdateStatus, Outcome, UpdateScript};
+use dsu_testkit::docker::{FakeService, FakeTask, FakeUpdateStatus, Outcome, UpdateScript};
 use dsu_testkit::mint::signed_at;
 use dsu_testkit::registry::Mode;
 use jiff::SignedDuration;
@@ -314,36 +314,82 @@ async fn a_deploy_of_the_image_swarm_already_runs_converges_without_an_update() 
     assert_free(&u, &rels[1]).await;
 }
 
-#[tokio::test]
-async fn an_update_that_starts_no_rollout_converges_when_an_earlier_one_settles() {
-    let (w, rels, image) = web_running_the_first().await;
-    // Someone else's update to the image is still rolling out: one task runs the old image,
-    // and the status Swarm shows belongs to that update.
-    let old = format!("{}/web@{}", w.env.registry, digest(2));
-    w.docker().set_tasks(
-        "web_server",
-        vec![
-            FakeTask::running("t1", &image),
-            FakeTask::running("t2", &old),
-        ],
-    );
-    let earlier = w.env.clock.now() - SignedDuration::from_hours(1);
+/// Someone else's update to the image the spec names, still in flight when the deploy reads
+/// the service (Swarm shows it `updating`), with the tasks on `tasks`.
+async fn earlier_update_in_flight(w: &World, tasks: Vec<FakeTask>) -> FakeService {
+    w.docker().set_tasks("web_server", tasks);
     let mut script = UpdateScript::new(Outcome::Converges);
     script.updating_reads = 3;
     w.docker().set_script(script);
+    let earlier = w.env.clock.now() - SignedDuration::from_hours(1);
     w.docker().begin_update("web_server", earlier);
-    let before = w.docker().service("web_server");
+    w.docker().service("web_server")
+}
+
+#[tokio::test]
+async fn an_update_that_clears_the_status_and_starts_no_rollout_converges() {
+    let (w, rels, image) = web_running_the_first().await;
+    let tasks = vec![
+        FakeTask::running("t1", &image),
+        FakeTask::running("t2", &image),
+    ];
+    let before = earlier_update_in_flight(&w, tasks).await;
     let u = w.updater().await;
     let record = run(&u, &rels[0]).await;
     assert_eq!(outcome(&record), (State::Converged, None));
     assert_eq!(phases(&record).last(), Some(&Phase::Waiting));
-    // The update changed the labels only, so Swarm started no rollout of its own.
+    // The update changed the labels only: Swarm cleared the status and started no rollout.
     let updates = w.docker().updates();
     assert_eq!(updates.len(), 1);
     assert_eq!(updates[0].body["TaskTemplate"], before.spec["TaskTemplate"]);
-    let after = w.docker().service("web_server");
-    assert_eq!(after.update_status.unwrap().started_at, earlier);
+    assert_eq!(w.docker().service("web_server").update_status, None);
     assert_eq!(service_state(&u, "web").await.floor, Some(signed_at()));
+    assert_free(&u, &rels[1]).await;
+}
+
+#[tokio::test]
+async fn a_label_only_update_while_a_task_runs_another_image_waits_for_its_rollout() {
+    let (w, rels, image) = web_running_the_first().await;
+    let old = format!("{}/web@{}", w.env.registry, digest(2));
+    let tasks = vec![
+        FakeTask::running("t1", &image),
+        FakeTask::running("t2", &old),
+    ];
+    earlier_update_in_flight(&w, tasks).await;
+    let u = w.updater().await;
+    let record = run(&u, &rels[0]).await;
+    assert_eq!(outcome(&record), (State::Converged, None));
+    assert_eq!(w.docker().updates().len(), 1);
+    // Swarm restarted the replacement of the old task as an update of this deploy.
+    let after = w.docker().service("web_server");
+    let status = after.update_status.unwrap();
+    assert_eq!(status.state, "completed");
+    assert!(status.started_at > w.env.clock.now());
+    assert!(after.tasks.iter().all(|t| t.image == image));
+    assert_free(&u, &rels[1]).await;
+}
+
+#[tokio::test]
+async fn a_task_list_that_cannot_be_read_before_the_update_is_swarm_refused() {
+    let (w, rels, _) = web_running_the_first().await;
+    w.docker().set_tasks_status(500);
+    let u = w.updater().await;
+    let record = run(&u, &rels[0]).await;
+    assert_eq!(
+        outcome(&record),
+        (State::Failed, Some(ErrorToken::SwarmRefused))
+    );
+    assert!(
+        record
+            .error
+            .unwrap()
+            .detail
+            .contains("tasks are not available")
+    );
+    assert!(w.docker().updates().is_empty());
+    let state = service_state(&u, "web").await;
+    assert!(state.pending.is_none() && state.failed.is_empty() && state.floor.is_none());
+    w.docker().set_tasks_status(200);
     assert_free(&u, &rels[1]).await;
 }
 

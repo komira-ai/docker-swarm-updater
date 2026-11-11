@@ -304,10 +304,12 @@ daemon's classic image store re-creates manifests on push, so the digest would n
    = <registry>/<repository>@<image_digest>` and two service labels, `org.docker-swarm-updater.deploy` (the deploy id) and
    `org.docker-swarm-updater.digest`. A version conflict is retried once after a fresh read; a second is `swarm_refused`.
 3. Poll every 2 s. An `UpdateStatus` counts only once it belongs to this update: `Version.Index` is past the one read in step 1 and
-   `UpdateStatus.StartedAt` is later than step 1's time; a terminal state left by an earlier update is ignored. Without a status of this update,
-   a Swarm that runs the new image as step 1 defines it is `converged` (an earlier update still moving tasks is waited for first). Then: `completed` with every running task on the new image and none on another is `converged`; `rollback_completed` is
+   `UpdateStatus.StartedAt` is later than step 1's time; a terminal state left by an earlier update is ignored. A status of this update
+   decides: `completed` with every running task on the new image and none on another is `converged`; `rollback_completed` is
    `rolled_back`; `paused` or `rollback_paused` is `paused` (a person must look); `converge_timeout_secs` passed (when non-zero) is
-   `timeout`, and the update is left to Swarm. The task states and their errors go into the record's last step.
+   `timeout`, and the update is left to Swarm. Without a status of this update, a Swarm that runs the new image as step 1 defines it
+   is `converged`: an update that changed only the labels clears `UpdateStatus` and starts no rollout. The task states and their
+   errors go into the record's last step.
 4. On `converged`: the service's signed-time floor becomes this `signed_time`; every manifest of the repository that is neither
    running, nor in Swarm's `PreviousSpec`, nor among the last `keep_previous` converged digests is deleted by digest. Blobs are freed by
    the registry's own garbage collection, which needs the registry read-only and is the operator's [E] (distribution's garbage-collection
@@ -394,8 +396,8 @@ not fetched. Real-world compatibility is the fixture test of 5.1. No test reads 
 
 - **Fake Docker API**: services with `Spec`, `Version`, `UpdateStatus` (with `StartedAt`), `PreviousSpec` and tasks; a script per test
   says how an update goes (converges, rolls back, pauses, never ends, conflicts on version, refuses, is answered 200 and dropped, keeps a
-  stale terminal state), an update that leaves the task template unchanged starts no rollout (as in Swarm), and it records every update
-  body it received.
+  stale terminal state), an update that leaves the task template unchanged clears the status and starts no rollout unless a task runs
+  another image (as in Swarm), the task list can fail, and it records every update body it received.
 - **Fake release server**: HTTPS on loopback with the test CA (`--ca-file`); files, redirects (allowed host, other host, `http`, a loop,
   six hops), errors, a short body, a stalled read. The fake resolver maps the allowed host names to a documentation address
   (203.0.113.10) and others to private or loopback addresses; the fake connector dials 203.0.113.10 to the server's loopback port, so the
