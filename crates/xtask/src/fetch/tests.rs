@@ -420,7 +420,8 @@ fn when_every_url_fails_the_error_lists_each_attempt_and_nothing_is_written() {
 }
 
 #[test]
-fn the_backoff_is_bounded_and_grows() {
+fn a_url_is_tried_at_most_three_times_5s_then_20s_apart() {
+    // The other tests compare pauses with `BACKOFF`; this pins its values.
     assert_eq!(BACKOFF, [Duration::from_secs(5), Duration::from_secs(20)]);
 }
 
