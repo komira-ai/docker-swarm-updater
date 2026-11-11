@@ -478,8 +478,8 @@ after the hand-off for restarts, the size and free-space limits). A new error to
   runner), the attestation check, the signed-time floor and Swarm's rollback. The caller's job grants `id-token: write`. Steps: an
   optional network step (when `tailscale-oauth-client-id` is set, the job joins that Tailscale network as an ephemeral node with
   `tailscale/github-action`, pinned by commit, Tailscale itself pinned by version and SHA-256, before any call; when empty, the step is
-  skipped; with it set and `tailscale-audience` or `tailscale-tags` empty, the job fails before the join with an error naming the
-  empty input); then the client `dsu-deploy`, built from the workflow's own commit (the `job` context's `workflow_repository` and
+  skipped; with it set and `tailscale-audience` or `tailscale-tags` empty, the job fails before the join, in a step whose name names
+  the empty input); then the client `dsu-deploy`, built from the workflow's own commit (the `job` context's `workflow_repository` and
   `workflow_sha`), which asks for a new OIDC token with `audience` for every request, sends Deploy, then Status every 10 s until a
   final state or `wait-minutes` (0: no limit), retrying a 503 or a connection failure on either. `converged` passes; any other final
   state fails the job with the record's error; `wait-minutes` passing fails it with "deploy <id> still running; it continues". One

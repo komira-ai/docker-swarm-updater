@@ -90,7 +90,7 @@ jobs:
 | `audience` | | the audience of every OIDC token, as the proxy expects it |
 | `environment` | | the calling repository's environment the job runs in |
 | `wait-minutes` | 60 | how long to wait for a final state; 0 waits however long it takes |
-| `tailscale-oauth-client-id`, `tailscale-audience`, `tailscale-tags` | empty | when the client id is set, the job first joins that tailnet as an ephemeral node with that Tailscale workload-identity client and those tags; with the client id set and the audience or the tags empty, the job fails before the join with an error naming the empty input |
+| `tailscale-oauth-client-id`, `tailscale-audience`, `tailscale-tags` | empty | when the client id is set, the job first joins that tailnet as an ephemeral node with that Tailscale workload-identity client and those tags; with the client id set and the audience or the tags empty, the job fails before the join, in a step whose name names the empty input |
 
 The job runs in the calling repository's environment, so that repository's environment rules
 apply and the token's `environment` claim names it; restrict the environment's deployment
