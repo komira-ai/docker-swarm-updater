@@ -31,8 +31,7 @@
 # Then the release deploys itself to the control plane (the service `docker-swarm-updater`),
 # only while the repository variables CP_DEPLOY_ENDPOINT and CP_DEPLOY_TAILSCALE_TAGS are not
 # empty: with either unset or empty, `deploy-digest` and `deploy` are skipped and the run ends
-# at `publish`. See the comment above
-# the two jobs. `deploy` holds `id-token: write` alone and cannot sign.
+# at `publish`. See the comment above the two jobs. `deploy` holds `id-token: write` alone and cannot sign.
 name: artifacts
 
 on:
@@ -364,8 +363,8 @@ jobs:
   # control plane's Docker Swarm, through the updater itself (docs/design.md section 3.6,
   # self-update). Both run only for a push to main and only while the repository variables
   # CP_DEPLOY_ENDPOINT and CP_DEPLOY_TAILSCALE_TAGS are not empty (the deploy front is reached
-  # through the tailnet, and a join without tags fails). The workflow lint (crates/xtask/tests/workflows.rs) holds
-  # them to this shape.
+  # through the tailnet, and a join without tags fails). The workflow lint
+  # (crates/xtask/tests/workflows.rs) holds them to this shape.
   #
   # deploy-digest  reads the published release (`contents: read`): it downloads SHA256SUMS and
   #          the linux-x86_64 image, refuses sums other than the ones `sums` made and an image

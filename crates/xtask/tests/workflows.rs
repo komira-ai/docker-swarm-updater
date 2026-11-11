@@ -13,8 +13,7 @@
 //!   run only for a push to `main` with both not empty ([`DEPLOY_IF`]); `deploy` holds only
 //!   `id-token: write` and calls exactly [`DEPLOY_WORKFLOW`] with exactly [`DEPLOY_WITH`],
 //!   which takes each of the three Tailscale inputs from its own `CP_DEPLOY_TAILSCALE_*`
-//!   variable; the one step of
-//!   `deploy-digest` that holds the token runs only `gh release download`.
+//!   variable; the one step of `deploy-digest` that holds the token runs only `gh release download`.
 //!
 //! [`violations`] is the check; the tests run it on the real files and on copies with one
 //! boundary broken, each of which it must name.
