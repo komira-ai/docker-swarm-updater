@@ -1,13 +1,18 @@
 //! The permission and trust boundaries of the workflows, read from the files themselves:
 //!
-//! - every workflow grants nothing at the top (`permissions: {}`) and pins every action by
-//!   commit;
+//! - every workflow grants nothing at the top (`permissions: {}`) and pins every action and
+//!   every called workflow by commit;
 //! - `artifacts.yml` runs only on a push to `main`; each job holds exactly the permissions
 //!   listed in [`ARTIFACTS_JOBS`]; only `attest` can sign (`id-token: write`,
 //!   `attestations: write`), it runs only for a push to `main`, checks out nothing and runs
 //!   only `sha256sum` and `cp`, so no repository code runs while it can sign; only `publish` can
 //!   write (`contents: write`), it checks out nothing and runs only `gh release create`; and
-//!   `publish` runs only after `verify`, which runs only after `attest`.
+//!   `publish` runs only after `verify`, which runs only after `attest`;
+//! - the release deploys itself only after `publish` and only while the repository variable
+//!   `CP_DEPLOY_ENDPOINT` is set: `deploy-digest` and `deploy` run only for a push to `main`
+//!   with that variable not empty ([`DEPLOY_IF`]); `deploy` holds only `id-token: write` and
+//!   calls exactly [`DEPLOY_WORKFLOW`] with exactly [`DEPLOY_WITH`]; the one step of
+//!   `deploy-digest` that holds the token runs only `gh release download`.
 //!
 //! [`violations`] is the check; the tests run it on the real files and on copies with one
 //! boundary broken, each of which it must name.
@@ -22,7 +27,7 @@ use yaml_rust2::yaml::Hash;
 use yaml_rust2::{Yaml as Value, YamlLoader};
 
 /// Each job of artifacts.yml and the permissions it holds, exactly.
-const ARTIFACTS_JOBS: [(&str, &str); 6] = [
+const ARTIFACTS_JOBS: [(&str, &str); 8] = [
     ("plan", "contents: read"),
     ("build", "contents: read"),
     ("sums", "contents: read"),
@@ -32,7 +37,33 @@ const ARTIFACTS_JOBS: [(&str, &str); 6] = [
     ),
     ("verify", "{contents: read, attestations: read}"),
     ("publish", "contents: write"),
+    ("deploy-digest", "contents: read"),
+    ("deploy", "id-token: write"),
 ];
+
+/// The condition of `deploy-digest` and `deploy`: a push to main, and the deploy front set.
+const DEPLOY_IF: &str = "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.CP_DEPLOY_ENDPOINT != '' }}";
+
+/// The reusable workflow `deploy` calls, at the commit the updater's allow-list names for
+/// `job_workflow_ref`.
+const DEPLOY_WORKFLOW: &str = "komira-ai/docker-swarm-updater/.github/workflows/deploy.yml@c1fcc47610e2886d4d9e561be3c0c76f0452d1f6";
+
+/// The inputs `deploy` sends, exactly: no signer input, so the signer is the default (this
+/// repository, artifacts.yml, refs/heads/main).
+const DEPLOY_WITH: &str = "
+service: docker-swarm-updater
+version: ${{ needs.plan.outputs.version }}
+image-digest: ${{ needs.deploy-digest.outputs.digest }}
+image-url: ${{ needs.deploy-digest.outputs.image-url }}
+bundle-url: ${{ needs.deploy-digest.outputs.bundle-url }}
+endpoint: ${{ vars.CP_DEPLOY_ENDPOINT }}
+audience: ${{ vars.CP_DEPLOY_AUDIENCE }}
+environment: controlplane
+wait-minutes: 60
+tailscale-oauth-client-id: ${{ vars.CP_DEPLOY_TAILSCALE_CLIENT_ID }}
+tailscale-audience: ${{ vars.CP_DEPLOY_TAILSCALE_AUDIENCE }}
+tailscale-tags: ${{ vars.CP_DEPLOY_TAILSCALE_TAGS }}
+";
 
 fn workflows_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows")
@@ -76,17 +107,17 @@ fn str_of(value: &Value) -> &str {
     value.as_str().unwrap_or("")
 }
 
-/// What every workflow must hold: nothing granted at the top, every action pinned by commit.
+/// What every workflow must hold: nothing granted at the top, every action and every called
+/// workflow pinned by commit.
 fn common_violations(name: &str, workflow: &Value) -> Vec<String> {
     let mut out = Vec::new();
     if get(workflow, "permissions") != Some(&Value::Hash(Hash::new())) {
         out.push(format!("{name}: top-level permissions are not {{}}"));
     }
     for (job_name, job) in workflow["jobs"].as_hash().into_iter().flatten() {
-        for step in steps(job) {
-            let Some(uses) = get(step, "uses").map(str_of) else {
-                continue;
-            };
+        let called = get(job, "uses").map(str_of);
+        let actions = steps(job).iter().filter_map(|s| get(s, "uses").map(str_of));
+        for uses in called.into_iter().chain(actions) {
             let pinned = uses.split_once('@').is_some_and(|(_, pin)| {
                 pin.len() == 40 && pin.bytes().all(|b| b.is_ascii_hexdigit())
             });
@@ -153,9 +184,44 @@ fn violations(artifacts: &Value) -> Vec<String> {
         ("publish", "verify"),
         ("verify", "attest"),
         ("attest", "sums"),
+        ("deploy-digest", "publish"),
+        ("deploy-digest", "sums"),
+        ("deploy", "deploy-digest"),
     ] {
         if !needs(job, other) {
             out.push(format!("artifacts.yml: {job} does not wait for {other}"));
+        }
+    }
+    out.extend(deploy_violations(&artifacts["jobs"]));
+    out
+}
+
+/// The boundaries of `deploy-digest` and `deploy`, the jobs of artifacts.yml `jobs`.
+fn deploy_violations(jobs: &Value) -> Vec<String> {
+    let mut out = Vec::new();
+    for name in ["deploy-digest", "deploy"] {
+        if str_of(&jobs[name]["if"]) != DEPLOY_IF {
+            out.push(format!(
+                "artifacts.yml: {name} is not limited to a push to main with CP_DEPLOY_ENDPOINT set"
+            ));
+        }
+    }
+    let deploy = &jobs["deploy"];
+    if str_of(&deploy["uses"]) != DEPLOY_WORKFLOW {
+        out.push(format!(
+            "artifacts.yml: deploy calls {:?}, not {DEPLOY_WORKFLOW}",
+            str_of(&deploy["uses"])
+        ));
+    }
+    if !get(deploy, "with").is_some_and(|w| same(w, &yaml(DEPLOY_WITH))) {
+        out.push("artifacts.yml: deploy does not send exactly the deploy inputs".into());
+    }
+    for step in steps(&jobs["deploy-digest"]) {
+        let run = str_of(&step["run"]);
+        if get(&step["env"], "GH_TOKEN").is_some() && !run.starts_with("gh release download ") {
+            out.push(format!(
+                "artifacts.yml: deploy-digest runs {run:?} holding the token"
+            ));
         }
     }
     out
@@ -289,4 +355,132 @@ fn each_broken_boundary_is_named() {
     for (workflow, message) in cases {
         assert_eq!(violations(&workflow), [message.to_owned()]);
     }
+}
+
+#[test]
+fn each_broken_deploy_boundary_is_named() {
+    let gate = "    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.CP_DEPLOY_ENDPOINT != '' }}\n";
+    let cases: Vec<(Value, &str)> = vec![
+        // The deploy jobs run without the variable, in deploy-digest and in deploy.
+        (
+            broken(|t| {
+                t.replacen(gate, "    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}\n", 1)
+            }),
+            "artifacts.yml: deploy-digest is not limited to a push to main with CP_DEPLOY_ENDPOINT set",
+        ),
+        (
+            broken(|t| {
+                let at = t.rfind(gate).unwrap();
+                format!("{}{}", &t[..at], &t[at + gate.len()..])
+            }),
+            "artifacts.yml: deploy is not limited to a push to main with CP_DEPLOY_ENDPOINT set",
+        ),
+        // deploy holds a scope beyond id-token: write.
+        (
+            broken(|t| {
+                t.replacen(
+                    "    permissions:\n      id-token: write\n    uses:",
+                    "    permissions:\n      id-token: write\n      contents: write\n    uses:",
+                    1,
+                )
+            }),
+            "artifacts.yml: job deploy does not hold exactly id-token: write",
+        ),
+        // The called workflow at another commit, or another repository's.
+        (
+            broken(|t| {
+                t.replacen(
+                    "deploy.yml@c1fcc47610e2886d4d9e561be3c0c76f0452d1f6",
+                    "deploy.yml@b1ad99f0b1ad99f0b1ad99f0b1ad99f0b1ad99f0",
+                    1,
+                )
+            }),
+            "artifacts.yml: deploy calls \"komira-ai/docker-swarm-updater/.github/workflows/deploy.yml@b1ad99f0b1ad99f0b1ad99f0b1ad99f0b1ad99f0\", not komira-ai/docker-swarm-updater/.github/workflows/deploy.yml@c1fcc47610e2886d4d9e561be3c0c76f0452d1f6",
+        ),
+        (
+            broken(|t| {
+                t.replacen(
+                    "uses: komira-ai/docker-swarm-updater/.github",
+                    "uses: someone-else/docker-swarm-updater/.github",
+                    1,
+                )
+            }),
+            "artifacts.yml: deploy calls \"someone-else/docker-swarm-updater/.github/workflows/deploy.yml@c1fcc47610e2886d4d9e561be3c0c76f0452d1f6\", not komira-ai/docker-swarm-updater/.github/workflows/deploy.yml@c1fcc47610e2886d4d9e561be3c0c76f0452d1f6",
+        ),
+        // Another service, a signer input that overrides the default, an input dropped.
+        (
+            broken(|t| {
+                t.replacen(
+                    "      service: docker-swarm-updater\n",
+                    "      service: other-service\n",
+                    1,
+                )
+            }),
+            "artifacts.yml: deploy does not send exactly the deploy inputs",
+        ),
+        (
+            broken(|t| {
+                t.replacen(
+                    "      environment: controlplane\n",
+                    "      environment: controlplane\n      signer-ref: refs/heads/dev\n",
+                    1,
+                )
+            }),
+            "artifacts.yml: deploy does not send exactly the deploy inputs",
+        ),
+        (
+            broken(|t| t.replacen("      wait-minutes: 60\n", "", 1)),
+            "artifacts.yml: deploy does not send exactly the deploy inputs",
+        ),
+        // The order: the digest before the release is published, the deploy without it.
+        (
+            broken(|t| {
+                t.replacen(
+                    "    needs: [plan, sums, publish]\n",
+                    "    needs: [plan, sums, verify]\n",
+                    1,
+                )
+            }),
+            "artifacts.yml: deploy-digest does not wait for publish",
+        ),
+        (
+            broken(|t| {
+                t.replacen(
+                    "    needs: [plan, deploy-digest]\n",
+                    "    needs: [plan, publish]\n",
+                    1,
+                )
+            }),
+            "artifacts.yml: deploy does not wait for deploy-digest",
+        ),
+        // Repository code run beside the token.
+        (
+            broken(|t| {
+                t.replacen(
+                    "        run: gh release download ",
+                    "        run: cargo xtask release deploy-inputs && gh release download ",
+                    1,
+                )
+            }),
+            "artifacts.yml: deploy-digest runs \"cargo xtask release deploy-inputs && gh release download \\\"v$VERSION\\\" --repo \\\"$REPO\\\" --dir release --pattern SHA256SUMS --pattern \\\"docker-swarm-updater-$VERSION-linux-x86_64.image.tar\\\"\" holding the token",
+        ),
+    ];
+    for (workflow, message) in cases {
+        assert_eq!(violations(&workflow), [message.to_owned()]);
+    }
+}
+
+/// A called workflow is held to a commit pin as an action is.
+#[test]
+fn a_called_workflow_without_a_commit_pin_is_named() {
+    let workflow = yaml(
+        "permissions: {}\njobs:\n  a:\n    uses: o/r/.github/workflows/w.yml@main\n  b:\n    uses: o/r/.github/workflows/w.yml@c1fcc47610e2886d4d9e561be3c0c76f0452d1f6\n  c:\n    uses: ./.github/workflows/w.yml\n",
+    );
+    assert_eq!(
+        common_violations("w.yml", &workflow),
+        [
+            "w.yml: job a uses o/r/.github/workflows/w.yml@main without a commit pin",
+            "w.yml: job c uses ./.github/workflows/w.yml without a commit pin",
+        ]
+    );
 }

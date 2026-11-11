@@ -17,11 +17,16 @@
 //! - `sums --dir <dir> --version <v> [--github-output <file>]` refuses a directory whose files
 //!   are not exactly the release's [`assets`], writes `SHA256SUMS` over them and prints
 //!   `sha256=<its SHA-256>`.
+//! - `deploy-inputs --dir <dir> --repo <owner>/<name> --version <v> [--github-output <file>]`
+//!   prints the manifest digest of the release's linux-x86_64 image and the release's
+//!   addresses of that image and its bundle, what the `deploy` job sends
+//!   (`release/deploy_inputs.rs`).
 //!
 //! With `--github-output`, the printed `key=value` line is also appended to that file (the
 //! step's `$GITHUB_OUTPUT`), so a step is one command.
 
 mod check_output;
+mod deploy_inputs;
 mod image;
 
 use std::collections::BTreeMap;
@@ -33,7 +38,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::Report;
 
-const USAGE: &str = "usage: xtask release version --commit-count <n> | --commit-count-file <file> [--root <dir>] [--github-output <file>] | stamp --version <x.y.z> [--root <dir>] | check-static --binary <file> | image --binary <file> --version <v> --commit <40 hex> --created <unix seconds> --platform linux/amd64|linux/arm64 --out <file> | check-output --expect <line> -- <program> [<arg>...] | sums --dir <dir> --version <v> [--github-output <file>]";
+const USAGE: &str = "usage: xtask release version --commit-count <n> | --commit-count-file <file> [--root <dir>] [--github-output <file>] | stamp --version <x.y.z> [--root <dir>] | check-static --binary <file> | image --binary <file> --version <v> --commit <40 hex> --created <unix seconds> --platform linux/amd64|linux/arm64 --out <file> | check-output --expect <line> -- <program> [<arg>...] | sums --dir <dir> --version <v> [--github-output <file>] | deploy-inputs --dir <dir> --repo <owner>/<name> --version <v> [--github-output <file>]";
 
 /// The program and image name every asset starts with.
 pub const NAME: &str = "docker-swarm-updater";
@@ -121,6 +126,7 @@ pub(crate) fn run(args: &[String]) -> Result<Report, String> {
             }
             Ok(report)
         }
+        "deploy-inputs" => deploy_inputs::run(rest),
         _ => Err(USAGE.into()),
     }
 }

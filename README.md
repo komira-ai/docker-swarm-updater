@@ -47,6 +47,12 @@ image's manifest digest (the `image_digest` of a deploy) is the one entry of the
 prints the version, that rebuilding it gives the same bytes, that the image written twice is
 the same bytes, and that the image loads into Docker and runs.
 
+After the release is published, the same workflow deploys it to the service
+`docker-swarm-updater` through the reusable workflow below, while the repository variable
+`CP_DEPLOY_ENDPOINT` is set (the deploy front; `CP_DEPLOY_AUDIENCE` and
+`CP_DEPLOY_TAILSCALE_CLIENT_ID`, `CP_DEPLOY_TAILSCALE_AUDIENCE`, `CP_DEPLOY_TAILSCALE_TAGS` give
+the rest). With it unset or empty, the deploy jobs are skipped.
+
 The updater's own health check, in its service's `healthcheck.test`:
 `["CMD", "/docker-swarm-updater", "probe", "--unix", "<its socket>", "/v1/health"]`.
 

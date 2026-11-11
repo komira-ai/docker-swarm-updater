@@ -19,13 +19,19 @@
 # `refs/heads/main`, started by `push`. The updater's config for its own service, and anyone
 # who verifies a release, names exactly that, so this file is never renamed or moved.
 #
-# Only `attest` holds `id-token: write` and `attestations: write`. While it holds them no
+# Only `attest` can sign: it is the one job with `attestations: write`, and holds it with
+# `id-token: write`. While it holds them no
 # repository code runs and nothing is built: pinned actions, two `sha256sum --check` and a `cp`
 # per bundle. The files reach it through the run's artifact store, where a job that ran
 # repository code could have replaced them, so it first refuses sums other than the ones
 # `sums` made (their SHA-256 is a job output), then files that differ from the sums. `verify`
 # then checks each file against its own bundle and signer before `publish` (the one job with
 # `contents: write`) creates the release.
+#
+# Then the release deploys itself to the control plane (the service `docker-swarm-updater`),
+# only while the repository variable CP_DEPLOY_ENDPOINT is not empty: with it unset or empty,
+# `deploy-digest` and `deploy` are skipped and the run ends at `publish`. See the comment above
+# the two jobs. `deploy` holds `id-token: write` alone and cannot sign.
 name: artifacts
 
 on:
@@ -352,3 +358,85 @@ jobs:
           REPO: ${{ github.repository }}
           VERSION: ${{ needs.plan.outputs.version }}
         run: gh release create "v$VERSION" dist/* --repo "$REPO" --target "$COMMIT" --title "docker-swarm-updater $VERSION" --notes "Built from $COMMIT by .github/workflows/artifacts.yml. Each file has its provenance bundle beside it as <file>.sigstore.json; SHA256SUMS lists the four files."
+
+  # deploy-digest and deploy: this release deployed to the service `docker-swarm-updater` on the
+  # control plane's Docker Swarm, through the updater itself (docs/design.md section 3.6,
+  # self-update). Both run only for a push to main and only while the repository variable
+  # CP_DEPLOY_ENDPOINT is not empty. The workflow lint (crates/xtask/tests/workflows.rs) holds
+  # them to this shape.
+  #
+  # deploy-digest  reads the published release (`contents: read`): it downloads SHA256SUMS and
+  #          the linux-x86_64 image, refuses sums other than the ones `sums` made and an image
+  #          that differs from them, and outputs the manifest digest the image's index.json
+  #          names and the release's addresses of the image and its bundle (`cargo xtask
+  #          release deploy-inputs`). No step that runs repository code holds the token: it is in
+  #          the download step's environment, and the checkout keeps no credentials.
+  # deploy   calls the reusable workflow deploy.yml of this repository at the commit the
+  #          updater's allow-list names for `job_workflow_ref` (a full commit, with its version
+  #          comment; a moved pin reaches the updater only once its config moves too), with
+  #          exactly `id-token: write`: the called job asks GitHub for an OIDC token for every
+  #          request and runs in this repository's environment `controlplane` (main only, no
+  #          required reviewer). It sends the release version, that digest and those addresses,
+  #          and leaves the signer to the defaults (this repository, artifacts.yml,
+  #          refs/heads/main). A token minted here cannot sign a release: its certificate would
+  #          name deploy.yml as the signer workflow, not this file, and the job has no
+  #          `attestations: write`. Tailscale's client id, audience and tags come from the
+  #          CP_DEPLOY_TAILSCALE_* variables. The job passes once the deploy is converged and
+  #          fails otherwise; it waits up to 60 minutes. While it runs, the next push's release
+  #          waits (the `artifacts` concurrency group), so releases deploy in push order.
+  deploy-digest:
+    needs: [plan, sums, publish]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.CP_DEPLOY_ENDPOINT != '' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+    outputs:
+      digest: ${{ steps.inputs.outputs.digest }}
+      image-url: ${{ steps.inputs.outputs.image-url }}
+      bundle-url: ${{ steps.inputs.outputs.bundle-url }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.COMMIT }}
+          persist-credentials: false
+      - run: rustup toolchain install
+      - name: Download SHA256SUMS and the linux-x86_64 image from the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: gh release download "v$VERSION" --repo "$REPO" --dir release --pattern SHA256SUMS --pattern "docker-swarm-updater-$VERSION-linux-x86_64.image.tar"
+      - name: Refuse sums other than the build's
+        env:
+          SUMS_SHA256: ${{ needs.sums.outputs.sha256 }}
+        run: /usr/bin/sha256sum --check --strict <<< "$SUMS_SHA256  release/SHA256SUMS"
+      - name: Refuse an image that differs from the sums
+        working-directory: release
+        run: /usr/bin/sha256sum --check --strict --ignore-missing SHA256SUMS
+      - name: The image's manifest digest and the release's addresses of it and its bundle
+        id: inputs
+        env:
+          REPO: ${{ github.repository }}
+        run: cargo xtask release deploy-inputs --dir release --repo "$REPO" --version "$VERSION" --github-output "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: [plan, deploy-digest]
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.CP_DEPLOY_ENDPOINT != '' }}
+    permissions:
+      id-token: write
+    uses: komira-ai/docker-swarm-updater/.github/workflows/deploy.yml@c1fcc47610e2886d4d9e561be3c0c76f0452d1f6 # v0.1.3
+    with:
+      service: docker-swarm-updater
+      version: ${{ needs.plan.outputs.version }}
+      image-digest: ${{ needs.deploy-digest.outputs.digest }}
+      image-url: ${{ needs.deploy-digest.outputs.image-url }}
+      bundle-url: ${{ needs.deploy-digest.outputs.bundle-url }}
+      endpoint: ${{ vars.CP_DEPLOY_ENDPOINT }}
+      audience: ${{ vars.CP_DEPLOY_AUDIENCE }}
+      environment: controlplane
+      wait-minutes: 60
+      tailscale-oauth-client-id: ${{ vars.CP_DEPLOY_TAILSCALE_CLIENT_ID }}
+      tailscale-audience: ${{ vars.CP_DEPLOY_TAILSCALE_AUDIENCE }}
+      tailscale-tags: ${{ vars.CP_DEPLOY_TAILSCALE_TAGS }}
