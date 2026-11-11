@@ -18,8 +18,8 @@ use std::path::Path;
 use std::process::Command;
 
 use serde_json::{Value as Json, json};
-use serde_yaml_ng::Value;
 use support::{DIGEST, ID, Server, record};
+use yaml_rust2::{Yaml as Value, YamlLoader};
 
 const WORKFLOW_REPOSITORY: &str = "komira-ai/docker-swarm-updater";
 const WORKFLOW_SHA: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -30,14 +30,26 @@ const BUNDLE_URL: &str = "https://github.com/example-org/app/releases/download/v
 
 fn workflow() -> Value {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.github/workflows/deploy.yml");
-    serde_yaml_ng::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    yaml(&std::fs::read_to_string(path).unwrap())
+}
+
+/// The one document of `text`.
+fn yaml(text: &str) -> Value {
+    let [document] = <[Value; 1]>::try_from(YamlLoader::load_from_str(text).unwrap()).unwrap();
+    document
+}
+
+/// The entry `key` of a mapping, `None` when it has no such entry.
+fn get<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
+    Some(&value[key]).filter(|v| !v.is_badvalue())
 }
 
 fn text(value: &Value) -> String {
     match value {
         Value::String(s) => s.clone(),
-        Value::Number(n) => n.to_string(),
-        Value::Bool(b) => b.to_string(),
+        Value::Integer(n) => n.to_string(),
+        Value::Real(r) => r.clone(),
+        Value::Boolean(b) => b.to_string(),
         other => panic!("not a scalar: {other:?}"),
     }
 }
@@ -54,12 +66,10 @@ impl Contexts {
     /// The caller's `with:` resolved as GitHub resolves it: every given input must be
     /// declared, every required one given, the others take their default.
     fn resolve(workflow: &Value, with: &[(&str, &str)]) -> Contexts {
-        let declared = workflow["on"]["workflow_call"]["inputs"]
-            .as_mapping()
-            .unwrap();
+        let declared = workflow["on"]["workflow_call"]["inputs"].as_hash().unwrap();
         for (name, _) in with {
             assert!(
-                declared.contains_key(*name),
+                declared.contains_key(&Value::String((*name).to_owned())),
                 "the caller gives an undeclared input {name}"
             );
         }
@@ -67,13 +77,13 @@ impl Contexts {
         for (name, spec) in declared {
             let name = text(name);
             let given = with.iter().find(|(n, _)| *n == name).map(|(_, v)| *v);
-            let value = match (given, spec.get("default")) {
+            let value = match (given, get(spec, "default")) {
                 (Some(v), _) => v.to_owned(),
                 (None, Some(default)) => text(default),
                 (None, None) => {
                     assert_ne!(
-                        spec.get("required"),
-                        Some(&Value::Bool(true)),
+                        get(spec, "required"),
+                        Some(&Value::Boolean(true)),
                         "required input {name} not given"
                     );
                     String::new()
@@ -168,19 +178,19 @@ fn run_job(workflow: &Value, contexts: &Contexts, token_url: &str) -> Run {
         client_output: String::new(),
     };
     let mut checkout: Option<String> = None;
-    for step in job["steps"].as_sequence().unwrap() {
+    for step in job["steps"].as_vec().unwrap() {
         let name = text(&step["name"]);
-        if let Some(condition) = step.get("if")
+        if let Some(condition) = get(step, "if")
             && !contexts.condition(&text(condition))
         {
             continue;
         }
-        if let Some(uses) = step.get("uses") {
+        if let Some(uses) = get(step, "uses") {
             let uses = text(uses);
             let (action, pin) = uses.split_once('@').unwrap();
             assert_eq!(pin.len(), 40, "{action} is not pinned by commit");
             let with: BTreeMap<String, String> = step["with"]
-                .as_mapping()
+                .as_hash()
                 .unwrap()
                 .iter()
                 .map(|(k, v)| (text(k), contexts.field(&text(v))))
@@ -197,7 +207,7 @@ fn run_job(workflow: &Value, contexts: &Contexts, token_url: &str) -> Run {
             return run;
         }
         // Every command after the checkout runs in this workflow's own checkout.
-        let directory = step.get("working-directory").map(text);
+        let directory = get(step, "working-directory").map(text);
         assert_eq!(directory, checkout, "{name} does not run in the checkout");
         match command.as_str() {
             // The toolchain of rust-toolchain.toml and the client built from the checkout:
@@ -228,7 +238,7 @@ fn deploy_step(
     token_url: &str,
 ) -> std::process::Output {
     let env: BTreeMap<String, String> = step["env"]
-        .as_mapping()
+        .as_hash()
         .unwrap()
         .iter()
         .map(|(k, v)| (text(k), contexts.field(&text(v))))
@@ -428,24 +438,21 @@ fn a_runner_that_cannot_name_the_workflows_commit_stops_before_any_checkout() {
 #[test]
 fn the_workflow_is_called_only_and_its_job_holds_only_id_token_in_the_callers_environment() {
     let workflow = workflow();
-    let on = workflow["on"].as_mapping().unwrap();
+    let on = workflow["on"].as_hash().unwrap();
     assert_eq!(on.len(), 1);
-    assert!(on.contains_key("workflow_call"));
-    assert_eq!(workflow["permissions"], Value::Mapping(Default::default()));
-    let jobs = workflow["jobs"].as_mapping().unwrap();
+    assert!(on.contains_key(&Value::String("workflow_call".to_owned())));
+    assert_eq!(workflow["permissions"], Value::Hash(Default::default()));
+    let jobs = workflow["jobs"].as_hash().unwrap();
     assert_eq!(jobs.len(), 1);
     let job = &workflow["jobs"]["deploy"];
-    assert_eq!(
-        job["permissions"],
-        serde_yaml_ng::from_str::<Value>("id-token: write").unwrap()
-    );
+    assert_eq!(job["permissions"], yaml("id-token: write"));
     assert_eq!(text(&job["environment"]), "${{ inputs.environment }}");
     // The inputs a caller must give.
     let required: Vec<String> = workflow["on"]["workflow_call"]["inputs"]
-        .as_mapping()
+        .as_hash()
         .unwrap()
         .iter()
-        .filter(|(_, spec)| spec.get("required") == Some(&Value::Bool(true)))
+        .filter(|(_, spec)| get(spec, "required") == Some(&Value::Boolean(true)))
         .map(|(name, _)| text(name))
         .collect();
     assert_eq!(

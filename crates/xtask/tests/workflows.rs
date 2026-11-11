@@ -18,7 +18,8 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_yaml_ng::{Mapping, Value};
+use yaml_rust2::yaml::Hash;
+use yaml_rust2::{Yaml as Value, YamlLoader};
 
 /// Each job of artifacts.yml and the permissions it holds, exactly.
 const ARTIFACTS_JOBS: [(&str, &str); 6] = [
@@ -38,16 +39,22 @@ fn workflows_dir() -> PathBuf {
 }
 
 fn load(name: &str) -> Value {
-    let text = std::fs::read_to_string(workflows_dir().join(name)).unwrap();
-    serde_yaml_ng::from_str(&text).unwrap()
+    yaml(&std::fs::read_to_string(workflows_dir().join(name)).unwrap())
 }
 
+/// The one document of `text`.
 fn yaml(text: &str) -> Value {
-    serde_yaml_ng::from_str(text).unwrap()
+    let [document] = <[Value; 1]>::try_from(YamlLoader::load_from_str(text).unwrap()).unwrap();
+    document
+}
+
+/// The entry `key` of a mapping, `None` when it has no such entry.
+fn get<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
+    Some(&value[key]).filter(|v| !v.is_badvalue())
 }
 
 fn steps(job: &Value) -> &[Value] {
-    job["steps"].as_sequence().map_or(&[], Vec::as_slice)
+    job["steps"].as_vec().map_or(&[], Vec::as_slice)
 }
 
 fn str_of(value: &Value) -> &str {
@@ -57,12 +64,12 @@ fn str_of(value: &Value) -> &str {
 /// What every workflow must hold: nothing granted at the top, every action pinned by commit.
 fn common_violations(name: &str, workflow: &Value) -> Vec<String> {
     let mut out = Vec::new();
-    if workflow.get("permissions") != Some(&Value::Mapping(Mapping::new())) {
+    if get(workflow, "permissions") != Some(&Value::Hash(Hash::new())) {
         out.push(format!("{name}: top-level permissions are not {{}}"));
     }
-    for (job_name, job) in workflow["jobs"].as_mapping().into_iter().flatten() {
+    for (job_name, job) in workflow["jobs"].as_hash().into_iter().flatten() {
         for step in steps(job) {
-            let Some(uses) = step.get("uses").map(str_of) else {
+            let Some(uses) = get(step, "uses").map(str_of) else {
                 continue;
             };
             let pinned = uses.split_once('@').is_some_and(|(_, pin)| {
@@ -85,7 +92,7 @@ fn violations(artifacts: &Value) -> Vec<String> {
     if artifacts["on"] != yaml("push: {branches: [main]}") {
         out.push("artifacts.yml: it runs on more than a push to main".into());
     }
-    let jobs = artifacts["jobs"].as_mapping().cloned().unwrap_or_default();
+    let jobs = artifacts["jobs"].as_hash().cloned().unwrap_or_default();
     let names: Vec<&str> = jobs.keys().map(str_of).collect();
     let expected: Vec<&str> = ARTIFACTS_JOBS.iter().map(|(n, _)| *n).collect();
     if names != expected {
@@ -95,7 +102,7 @@ fn violations(artifacts: &Value) -> Vec<String> {
     }
     for (name, permissions) in ARTIFACTS_JOBS {
         let job = &artifacts["jobs"][name];
-        if job.get("permissions") != Some(&yaml(permissions)) {
+        if get(job, "permissions") != Some(&yaml(permissions)) {
             out.push(format!(
                 "artifacts.yml: job {name} does not hold exactly {permissions}"
             ));
@@ -115,7 +122,7 @@ fn violations(artifacts: &Value) -> Vec<String> {
             if str_of(&step["uses"]).starts_with("actions/checkout@") {
                 out.push(format!("artifacts.yml: {name} checks out the repository"));
             }
-            if let Some(run) = step.get("run").map(str_of)
+            if let Some(run) = get(step, "run").map(str_of)
                 && !allowed.iter().any(|prefix| run.starts_with(prefix))
             {
                 out.push(format!("artifacts.yml: {name} runs {run:?}"));
@@ -124,7 +131,7 @@ fn violations(artifacts: &Value) -> Vec<String> {
     }
     let needs = |job: &str, other: &str| {
         artifacts["jobs"][job]["needs"]
-            .as_sequence()
+            .as_vec()
             .is_some_and(|n| n.iter().any(|v| str_of(v) == other))
     };
     for (job, other) in [
@@ -165,7 +172,7 @@ fn broken(edit: impl Fn(&str) -> String) -> Value {
     let text = std::fs::read_to_string(workflows_dir().join("artifacts.yml")).unwrap();
     let changed = edit(&text);
     assert_ne!(changed, text, "the edit changed nothing");
-    serde_yaml_ng::from_str(&changed).unwrap()
+    yaml(&changed)
 }
 
 #[test]
