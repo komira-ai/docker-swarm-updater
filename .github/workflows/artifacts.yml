@@ -84,6 +84,9 @@ jobs:
         # below runs the binary and the image on the kind of host they are for.
         # musl's C toolchain (musl-gcc and the musl headers and libraries) comes from Ubuntu
         # 24.04's own packages, fetched by URL and checked by SHA-256 before it is installed.
+        # Each .deb is the same file at every URL `Fetch musl*` names: Launchpad, the archive
+        # pool of the platform (ports for arm64), a fixed snapshot of that pool, and a mirror
+        # outside Canonical's names. They are tried in that order; the SHA-256 is one pin.
         include:
           - platform: linux-x86_64
             runner: ubuntu-24.04
@@ -91,6 +94,9 @@ jobs:
             oci-platform: linux/amd64
             musl-cc: x86_64-linux-musl-gcc
             deb-arch: amd64
+            deb-archive: https://archive.ubuntu.com/ubuntu
+            deb-snapshot: https://snapshot.ubuntu.com/ubuntu/20261101T000000Z
+            deb-mirror: https://mirrors.edge.kernel.org/ubuntu
             musl-sha256: 9f0883c20b4b746e05e947bafd99cb933f5494ffaaa6fcd360cbe1fbcf264883
             musl-dev-sha256: 4b451ecb6a0f8469883058cf22a807f3bd9cc16d115cc08b7efc35fe8eb44db2
             musl-tools-sha256: 46c01d212d3eb3a1322693089037f0a5c92383a089d39c392db3c86c19ffb229
@@ -100,6 +106,9 @@ jobs:
             oci-platform: linux/arm64
             musl-cc: aarch64-linux-musl-gcc
             deb-arch: arm64
+            deb-archive: https://ports.ubuntu.com/ubuntu-ports
+            deb-snapshot: https://snapshot.ubuntu.com/ubuntu-ports/20261101T000000Z
+            deb-mirror: https://mirrors.mit.edu/ubuntu-ports
             musl-sha256: 79a04df7e8f54c74720ad474c04966204c03370654f4a43bec2968e80821e39f
             musl-dev-sha256: 56e4fa8e6fcd2825ca9e262e8807d2038d4a0e91274bd51fce1653b219f5ae92
             musl-tools-sha256: 0ecd1f97fd8cf6727d492c6a7515e44a5a905f5af123fc90f35f954cabc50d60
@@ -111,7 +120,11 @@ jobs:
       MUSL_CC: ${{ matrix.musl-cc }}
       DEB_ARCH: ${{ matrix.deb-arch }}
       MUSL_VERSION: 1.2.4-2
-      DEBS: https://launchpad.net/ubuntu/+archive/primary/+files
+      LAUNCHPAD: https://launchpad.net/ubuntu/+archive/primary/+files
+      ARCHIVE: ${{ matrix.deb-archive }}
+      SNAPSHOT: ${{ matrix.deb-snapshot }}
+      MIRROR: ${{ matrix.deb-mirror }}
+      POOL: pool/universe/m/musl
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -122,15 +135,24 @@ jobs:
       - name: Fetch musl
         env:
           SHA256: ${{ matrix.musl-sha256 }}
-        run: cargo xtask fetch --url "$DEBS/musl_${MUSL_VERSION}_$DEB_ARCH.deb" --sha256 "$SHA256" --out "$RUNNER_TEMP/musl.deb"
+          DEB: musl_${{ env.MUSL_VERSION }}_${{ matrix.deb-arch }}.deb
+        run: >-
+          cargo xtask fetch --sha256 "$SHA256" --out "$RUNNER_TEMP/musl.deb"
+          --url "$LAUNCHPAD/$DEB" --url "$ARCHIVE/$POOL/$DEB" --url "$SNAPSHOT/$POOL/$DEB" --url "$MIRROR/$POOL/$DEB"
       - name: Fetch musl-dev
         env:
           SHA256: ${{ matrix.musl-dev-sha256 }}
-        run: cargo xtask fetch --url "$DEBS/musl-dev_${MUSL_VERSION}_$DEB_ARCH.deb" --sha256 "$SHA256" --out "$RUNNER_TEMP/musl-dev.deb"
+          DEB: musl-dev_${{ env.MUSL_VERSION }}_${{ matrix.deb-arch }}.deb
+        run: >-
+          cargo xtask fetch --sha256 "$SHA256" --out "$RUNNER_TEMP/musl-dev.deb"
+          --url "$LAUNCHPAD/$DEB" --url "$ARCHIVE/$POOL/$DEB" --url "$SNAPSHOT/$POOL/$DEB" --url "$MIRROR/$POOL/$DEB"
       - name: Fetch musl-tools
         env:
           SHA256: ${{ matrix.musl-tools-sha256 }}
-        run: cargo xtask fetch --url "$DEBS/musl-tools_${MUSL_VERSION}_$DEB_ARCH.deb" --sha256 "$SHA256" --out "$RUNNER_TEMP/musl-tools.deb"
+          DEB: musl-tools_${{ env.MUSL_VERSION }}_${{ matrix.deb-arch }}.deb
+        run: >-
+          cargo xtask fetch --sha256 "$SHA256" --out "$RUNNER_TEMP/musl-tools.deb"
+          --url "$LAUNCHPAD/$DEB" --url "$ARCHIVE/$POOL/$DEB" --url "$SNAPSHOT/$POOL/$DEB" --url "$MIRROR/$POOL/$DEB"
       - name: Install musl
         run: sudo dpkg --install "$RUNNER_TEMP/musl.deb" "$RUNNER_TEMP/musl-dev.deb" "$RUNNER_TEMP/musl-tools.deb"
       # aws-lc-sys compiles C for the musl target with the compiler named after the target's

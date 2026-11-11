@@ -1,5 +1,8 @@
-//! Tests of `fetch` against an in-process HTTPS server on 127.0.0.1 with a test CA.
+//! Tests of `fetch`: the order of URLs, the retries and the fatal mismatch with a scripted
+//! getter and no network; the download itself against an in-process HTTPS server on 127.0.0.1
+//! with a test CA.
 
+use std::collections::{BTreeMap, VecDeque};
 use std::io::Write as _;
 use std::net::TcpListener;
 use std::path::Path;
@@ -92,6 +95,7 @@ fn route(path: &str, port: u16) -> Reply {
             missing: 5,
             ..reply(200, None, FILE)
         },
+        "/503" => reply(503, None, b"try later"),
         "/rel" => reply(307, Some("/file"), b""),
         "/abs" => reply(301, Some(&format!("https://127.0.0.1:{port}/file")), b""),
         "/http" => reply(302, Some("http://127.0.0.1:1/file"), b""),
@@ -197,15 +201,29 @@ fn sha(bytes: &[u8]) -> String {
 
 fn opts(path: &str, sha256: String, out: &Path, member: Option<&str>) -> Options {
     Options {
-        url: url(path),
+        urls: vec![url(path)],
         sha256,
         out: out.to_path_buf(),
         member: member.map(str::to_owned),
     }
 }
 
-fn get(o: &Options) -> Result<(), String> {
-    fetch(o, roots(), MAX_BYTES)
+/// [`fetch`] from the test server with no pause.
+fn get(o: &Options) -> Result<String, String> {
+    let agent = agent(roots());
+    fetch(o, &mut |u| download(&agent, u, MAX_BYTES), &mut |_| ())
+}
+
+/// One download from the test server.
+fn down(path: &str) -> Result<Vec<u8>, Failure> {
+    download(&agent(roots()), &url(path), MAX_BYTES)
+}
+
+fn transient(message: String) -> Failure {
+    Failure {
+        message,
+        transient: true,
+    }
 }
 
 /// Nothing but what the test put there: no `out`, no `.part`.
@@ -218,11 +236,285 @@ fn assert_untouched(dir: &Path, expected: &[&str]) {
     assert_eq!(names, expected);
 }
 
+// The order of URLs, the retries and the mismatch, with a scripted getter (no network).
+
+/// What the scripted getter answers for one call.
+type Answer = Result<Vec<u8>, Failure>;
+
+/// A getter that answers each URL from its own queue of results and records every call, and a
+/// pause that records every wait. A URL with an empty queue is a test bug.
+struct Script {
+    answers: BTreeMap<String, VecDeque<Answer>>,
+    calls: Vec<String>,
+    pauses: Vec<Duration>,
+}
+
+impl Script {
+    fn new(answers: &[(&str, Vec<Answer>)]) -> Self {
+        let mut map = BTreeMap::new();
+        for (u, results) in answers {
+            map.insert((*u).to_owned(), results.iter().cloned().collect());
+        }
+        Script {
+            answers: map,
+            calls: Vec::new(),
+            pauses: Vec::new(),
+        }
+    }
+
+    fn fetch(&mut self, o: &Options) -> Result<String, String> {
+        let (answers, calls, pauses) = (&mut self.answers, &mut self.calls, &mut self.pauses);
+        fetch(
+            o,
+            &mut |u| {
+                calls.push(u.to_owned());
+                answers.get_mut(u).unwrap().pop_front().unwrap()
+            },
+            &mut |d| pauses.push(d),
+        )
+    }
+}
+
+fn down_dns(u: &str) -> Answer {
+    Err(transient(format!("{u}: host not found")))
+}
+
+fn gone(u: &str) -> Answer {
+    Err(Failure::permanent(format!("{u}: status 404")))
+}
+
+fn scripted(urls: &[&str], out: &Path) -> Options {
+    Options {
+        urls: urls.iter().map(|u| (*u).to_owned()).collect(),
+        sha256: sha(FILE),
+        out: out.to_path_buf(),
+        member: None,
+    }
+}
+
+const A: &str = "https://a/f";
+const B: &str = "https://b/f";
+const C: &str = "https://c/f";
+const D: &str = "https://d/f";
+
+#[test]
+fn urls_are_tried_in_order_and_the_first_that_serves_the_file_is_used() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("f.deb");
+    // A is gone, B never resolves, C serves the file; D is never asked.
+    let mut script = Script::new(&[
+        (A, vec![gone(A)]),
+        (B, vec![down_dns(B), down_dns(B), down_dns(B)]),
+        (C, vec![Ok(FILE.to_vec())]),
+        (D, vec![]),
+    ]);
+    let log = script.fetch(&scripted(&[A, B, C, D], &out)).unwrap();
+    assert_eq!(script.calls, [A, B, B, B, C]);
+    assert_eq!(script.pauses, BACKOFF);
+    assert_eq!(
+        log,
+        format!(
+            "fetch: {A}: attempt 1 of 3: {A}: status 404\n\
+             fetch: {B}: attempt 1 of 3: {B}: host not found; again in 5s\n\
+             fetch: {B}: attempt 2 of 3: {B}: host not found; again in 20s\n\
+             fetch: {B}: attempt 3 of 3: {B}: host not found\n\
+             fetch: wrote {} from {C}\n",
+            out.display()
+        )
+    );
+    assert_eq!(std::fs::read(&out).unwrap(), FILE);
+    assert_untouched(dir.path(), &["f.deb"]);
+}
+
+#[test]
+fn a_transient_failure_is_tried_again_after_a_pause_and_a_later_url_is_not_asked() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("f.deb");
+    let mut script = Script::new(&[(A, vec![down_dns(A), Ok(FILE.to_vec())]), (B, vec![])]);
+    script.fetch(&scripted(&[A, B], &out)).unwrap();
+    assert_eq!(script.calls, [A, A]);
+    assert_eq!(script.pauses, [BACKOFF[0]]);
+    assert_eq!(std::fs::read(&out).unwrap(), FILE);
+}
+
+#[test]
+fn a_permanent_failure_is_not_tried_again_and_the_next_url_follows_without_a_pause() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("f.deb");
+    let mut script = Script::new(&[(A, vec![gone(A)]), (B, vec![Ok(FILE.to_vec())])]);
+    script.fetch(&scripted(&[A, B], &out)).unwrap();
+    assert_eq!(script.calls, [A, B]);
+    assert_eq!(script.pauses, Vec::<Duration>::new());
+}
+
+#[test]
+fn a_sha256_mismatch_from_any_url_is_fatal_even_when_a_later_url_has_the_file() {
+    for wrong_at in 0..4 {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("f.deb");
+        std::fs::write(&out, "old").unwrap();
+        let urls = [A, B, C, D];
+        // The URLs before `wrong_at` fail (A transiently, once, then for good), the one at
+        // `wrong_at` serves other bytes, the ones after it would serve the file.
+        let answers: Vec<(&str, Vec<Answer>)> = urls
+            .iter()
+            .enumerate()
+            .map(|(i, u)| {
+                let results = match i.cmp(&wrong_at) {
+                    std::cmp::Ordering::Less if i == 0 => vec![down_dns(u), gone(u)],
+                    std::cmp::Ordering::Less => vec![gone(u)],
+                    std::cmp::Ordering::Equal => vec![Ok(b"other".to_vec())],
+                    std::cmp::Ordering::Greater => vec![Ok(FILE.to_vec())],
+                };
+                (*u, results)
+            })
+            .collect();
+        let mut script = Script::new(&answers);
+        let err = script.fetch(&scripted(&urls, &out)).unwrap_err();
+        assert_eq!(
+            err,
+            format!(
+                "sha256 mismatch for {}: expected {}, got {}",
+                urls[wrong_at],
+                sha(FILE),
+                sha(b"other")
+            ),
+            "wrong at {wrong_at}"
+        );
+        assert_eq!(script.calls.last().unwrap(), urls[wrong_at]);
+        assert!(
+            script
+                .calls
+                .iter()
+                .all(|c| urls[..=wrong_at].contains(&c.as_str()))
+        );
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "old");
+        assert_untouched(dir.path(), &["f.deb"]);
+    }
+}
+
+#[test]
+fn when_every_url_fails_the_error_lists_each_attempt_and_nothing_is_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("f.deb");
+    let mut script = Script::new(&[
+        (A, vec![down_dns(A), down_dns(A), down_dns(A)]),
+        (B, vec![down_dns(B), gone(B)]),
+    ]);
+    let err = script.fetch(&scripted(&[A, B], &out)).unwrap_err();
+    assert_eq!(
+        err,
+        format!(
+            "no URL served {}:\n\
+             fetch: {A}: attempt 1 of 3: {A}: host not found; again in 5s\n\
+             fetch: {A}: attempt 2 of 3: {A}: host not found; again in 20s\n\
+             fetch: {A}: attempt 3 of 3: {A}: host not found\n\
+             fetch: {B}: attempt 1 of 3: {B}: host not found; again in 5s\n\
+             fetch: {B}: attempt 2 of 3: {B}: status 404\n",
+            out.display()
+        )
+    );
+    assert_eq!(script.calls, [A, A, A, B, B]);
+    assert_eq!(script.pauses, [BACKOFF[0], BACKOFF[1], BACKOFF[0]]);
+    assert_untouched(dir.path(), &[]);
+}
+
+#[test]
+fn a_url_is_tried_at_most_three_times_5s_then_20s_apart() {
+    // The other tests compare pauses with `BACKOFF`; this pins its values.
+    assert_eq!(BACKOFF, [Duration::from_secs(5), Duration::from_secs(20)]);
+}
+
+// Which failures of a request are transient.
+
+#[test]
+fn a_failed_name_lookup_connection_or_timeout_is_transient_and_nothing_else_is() {
+    let transient = [
+        ureq::Error::HostNotFound,
+        ureq::Error::ConnectionFailed,
+        ureq::Error::Io(std::io::ErrorKind::ConnectionReset.into()),
+        ureq::Error::Timeout(ureq::Timeout::Connect),
+        ureq::Error::Timeout(ureq::Timeout::Resolve),
+        ureq::Error::Timeout(ureq::Timeout::Global),
+        ureq::Error::Io(std::io::ErrorKind::ConnectionRefused.into()),
+        ureq::Error::Io(std::io::ErrorKind::UnexpectedEof.into()),
+        ureq::Error::Io(std::io::ErrorKind::TimedOut.into()),
+        ureq::Error::Io(std::io::ErrorKind::NetworkUnreachable.into()),
+    ];
+    for e in &transient {
+        assert!(is_transient(e), "{e:?}");
+    }
+    let permanent = [
+        ureq::Error::StatusCode(404),
+        ureq::Error::BadUri("x".into()),
+        ureq::Error::Tls("bad"),
+        ureq::Error::RequireHttpsOnly("http://x".into()),
+        ureq::Error::TooManyRedirects,
+        ureq::Error::LargeResponseHeader(1, 1),
+        // How a certificate the roots do not vouch for arrives.
+        ureq::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid peer certificate",
+        )),
+        ureq::Error::Io(std::io::ErrorKind::PermissionDenied.into()),
+    ];
+    for e in &permanent {
+        assert!(!is_transient(e), "{e:?}");
+    }
+}
+
+#[test]
+fn a_refused_connection_is_transient() {
+    // A port that was just free on loopback: nothing listens on it.
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let u = format!("https://127.0.0.1:{port}/x");
+    let failure = download(&agent(roots()), &u, MAX_BYTES).unwrap_err();
+    assert!(failure.transient, "{failure:?}");
+    assert!(
+        failure.message.starts_with(&format!("{u}: ")),
+        "{failure:?}"
+    );
+}
+
+#[test]
+fn a_5xx_is_transient_and_a_4xx_is_not() {
+    assert_eq!(
+        down("/503").unwrap_err(),
+        transient(format!("{}: status 503", url("/503")))
+    );
+    assert_eq!(
+        down("/404").unwrap_err(),
+        Failure::permanent(format!("{}: status 404", url("/404")))
+    );
+}
+
+#[test]
+fn a_body_cut_short_is_transient() {
+    let failure = down("/short").unwrap_err();
+    assert!(failure.transient, "{failure:?}");
+    assert!(
+        failure
+            .message
+            .starts_with(&format!("{}: reading the body: ", url("/short"))),
+        "{failure:?}"
+    );
+}
+
+// The download and the install, against the test server.
+
 #[test]
 fn a_file_with_the_right_sha256_is_written_executable() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("tool");
-    get(&opts("/file", sha(FILE), &out, None)).unwrap();
+    let log = get(&opts("/file", sha(FILE), &out, None)).unwrap();
+    assert_eq!(
+        log,
+        format!("fetch: wrote {} from {}\n", out.display(), url("/file"))
+    );
     assert_eq!(std::fs::read(&out).unwrap(), FILE);
     assert_eq!(
         std::fs::metadata(&out).unwrap().permissions().mode() & 0o777,
@@ -246,11 +538,15 @@ fn a_sha256_mismatch_writes_nothing_and_unpacks_nothing() {
     let out = dir.path().join("tool");
     // The body is not even an archive: the mismatch is reported first.
     let err = get(&opts("/file", sha(b"other"), &out, Some("bin/tool"))).unwrap_err();
-    assert!(
-        err.starts_with("sha256 mismatch for https://127.0.0.1:"),
-        "{err}"
+    assert_eq!(
+        err,
+        format!(
+            "sha256 mismatch for {}: expected {}, got {}",
+            url("/file"),
+            sha(b"other"),
+            sha(FILE)
+        )
     );
-    assert!(err.contains(&sha(FILE)), "{err}");
     assert_untouched(dir.path(), &[]);
 }
 
@@ -292,20 +588,11 @@ fn a_body_that_is_not_a_gzip_tar_or_is_cut_short_is_refused() {
 }
 
 #[test]
-fn a_body_cut_short_is_an_error() {
+fn a_body_cut_short_on_every_attempt_writes_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("tool");
     let err = get(&opts("/short", sha(FILE), &out, None)).unwrap_err();
-    assert!(err.contains("reading the body"), "{err}");
-    assert_untouched(dir.path(), &[]);
-}
-
-#[test]
-fn a_status_outside_2xx_is_an_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("tool");
-    let err = get(&opts("/404", sha(FILE), &out, None)).unwrap_err();
-    assert!(err.ends_with("/404: status 404"), "{err}");
+    assert_eq!(err.matches("reading the body").count(), 3, "{err}");
     assert_untouched(dir.path(), &[]);
 }
 
@@ -321,65 +608,67 @@ fn redirects_are_followed_relative_or_absolute_up_to_five() {
 }
 
 #[test]
-fn a_sixth_redirect_is_refused() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("tool");
-    let err = get(&opts("/hop/6", sha(FILE), &out, None)).unwrap_err();
-    assert!(err.ends_with("more than 5 redirects"), "{err}");
-    assert_untouched(dir.path(), &[]);
+fn a_sixth_redirect_is_refused_for_good() {
+    assert_eq!(
+        down("/hop/6").unwrap_err(),
+        Failure::permanent(format!("{}: more than 5 redirects", url("/hop/6")))
+    );
 }
 
 #[test]
-fn a_redirect_to_http_is_refused_and_so_is_an_http_url() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("tool");
-    let err = get(&opts("/http", sha(FILE), &out, None)).unwrap_err();
-    assert_eq!(err, "http://127.0.0.1:1/file: only https URLs are fetched");
-    let mut o = opts("/file", sha(FILE), &out, None);
-    o.url = "http://127.0.0.1:1/file".into();
-    assert!(get(&o).unwrap_err().contains("only https"));
-    assert_untouched(dir.path(), &[]);
+fn a_redirect_to_http_is_refused_for_good_and_so_is_an_http_url() {
+    assert_eq!(
+        down("/http").unwrap_err(),
+        Failure::permanent("http://127.0.0.1:1/file: only https URLs are fetched".into())
+    );
+    assert_eq!(
+        download(&agent(roots()), "http://127.0.0.1:1/file", MAX_BYTES).unwrap_err(),
+        Failure::permanent("http://127.0.0.1:1/file: only https URLs are fetched".into())
+    );
 }
 
 #[test]
-fn an_unusable_url_or_location_is_refused() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("tool");
-    let err = get(&opts("/no-location", sha(FILE), &out, None)).unwrap_err();
-    assert!(err.ends_with("redirect without a usable Location"), "{err}");
-    let err = get(&opts("/bad-location", sha(FILE), &out, None)).unwrap_err();
-    assert!(err.contains("bad Location https://["), "{err}");
-    let mut o = opts("/file", sha(FILE), &out, None);
-    o.url = "not a url".into();
-    assert!(get(&o).unwrap_err().starts_with("not a url:"));
+fn an_unusable_url_or_location_is_refused_for_good() {
+    assert_eq!(
+        down("/no-location").unwrap_err(),
+        Failure::permanent(format!(
+            "{}: redirect without a usable Location",
+            url("/no-location")
+        ))
+    );
+    let failure = down("/bad-location").unwrap_err();
+    assert!(!failure.transient);
+    assert!(
+        failure.message.contains("bad Location https://["),
+        "{failure:?}"
+    );
+    let failure = download(&agent(roots()), "not a url", MAX_BYTES).unwrap_err();
+    assert!(!failure.transient);
+    assert!(failure.message.starts_with("not a url:"), "{failure:?}");
 }
 
 #[test]
-fn a_server_the_roots_do_not_vouch_for_is_refused() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("tool");
-    let o = opts("/file", sha(FILE), &out, None);
+fn a_server_the_roots_do_not_vouch_for_is_refused_for_good() {
     let (other_ca, _, _) = test_pki();
     let other =
         RootCerts::new_with_certs(&[ureq::tls::Certificate::from_der(&other_ca).to_owned()]);
-    assert!(fetch(&o, other, MAX_BYTES).is_err());
-    assert_untouched(dir.path(), &[]);
+    let failure = download(&agent(other), &url("/file"), MAX_BYTES).unwrap_err();
+    assert!(!failure.transient, "{failure:?}");
 }
 
 #[test]
-fn a_body_over_the_cap_is_refused() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = dir.path().join("tool");
-    let o = opts("/file", sha(FILE), &out, None);
+fn a_body_over_the_cap_is_refused_for_good() {
     let size = FILE.len() as u64;
-    fetch(&o, roots(), size).unwrap();
-    std::fs::remove_file(&out).unwrap();
-    let err = fetch(&o, roots(), size - 1).unwrap_err();
-    assert!(
-        err.ends_with(&format!("body is larger than {} bytes", size - 1)),
-        "{err}"
+    let agent = agent(roots());
+    assert_eq!(download(&agent, &url("/file"), size).unwrap(), FILE);
+    assert_eq!(
+        download(&agent, &url("/file"), size - 1).unwrap_err(),
+        Failure::permanent(format!(
+            "{}: body is larger than {} bytes",
+            url("/file"),
+            size - 1
+        ))
     );
-    assert_untouched(dir.path(), &[]);
 }
 
 #[test]
@@ -396,12 +685,14 @@ fn a_write_that_fails_leaves_no_part_file() {
     assert_untouched(dir.path(), &["occupied"]);
 }
 
+// The command line.
+
 fn s(v: &[&str]) -> Vec<String> {
     v.iter().map(|x| (*x).to_owned()).collect()
 }
 
 #[test]
-fn the_command_line_needs_url_sha256_and_out() {
+fn the_command_line_needs_a_url_sha256_and_out_and_keeps_the_urls_in_order() {
     let hex = "0".repeat(64);
     let o = parse_args(&s(&[
         "--url",
@@ -410,6 +701,8 @@ fn the_command_line_needs_url_sha256_and_out() {
         &hex.to_uppercase(),
         "--out",
         "o",
+        "--url",
+        "https://g/x",
         "--member",
         "m",
     ]))
@@ -417,7 +710,7 @@ fn the_command_line_needs_url_sha256_and_out() {
     assert_eq!(
         o,
         Options {
-            url: "https://h/x".into(),
+            urls: vec!["https://h/x".into(), "https://g/x".into()],
             sha256: hex.clone(),
             out: "o".into(),
             member: Some("m".into())
@@ -432,6 +725,7 @@ fn the_command_line_needs_url_sha256_and_out() {
     for args in [
         s(&[]),
         s(&["--url", "u", "--sha256", &hex]),
+        s(&["--url", "u", "--out", "o"]),
         s(&["--sha256", &hex, "--out", "o"]),
     ] {
         assert_eq!(parse_args(&args).unwrap_err(), USAGE);
@@ -451,11 +745,13 @@ fn the_command_line_needs_url_sha256_and_out() {
 }
 
 #[test]
-fn run_installs_the_file_and_reports_it() {
+fn run_tries_the_next_url_and_reports_what_it_did() {
     let dir = tempfile::tempdir().unwrap();
     let out = dir.path().join("tool");
     let hex = sha(FILE);
     let args = s(&[
+        "--url",
+        &url("/503"),
         "--url",
         &url("/file"),
         "--sha256",
@@ -463,26 +759,44 @@ fn run_installs_the_file_and_reports_it() {
         "--out",
         &out.to_string_lossy(),
     ]);
-    let report = run_with(&args, roots(), MAX_BYTES).unwrap();
+    let mut pauses = Vec::new();
+    let report = run_with(&args, roots(), MAX_BYTES, &mut |d| pauses.push(d)).unwrap();
     assert!(report.passed);
-    assert_eq!(report.text, format!("fetch: wrote {}\n", out.display()));
+    let failed = format!(
+        "fetch: {0}: attempt {{}} of 3: {0}: status 503",
+        url("/503")
+    );
+    assert_eq!(
+        report.text,
+        format!(
+            "{}; again in 5s\n{}; again in 20s\n{}\nfetch: wrote {} from {}\n",
+            failed.replace("{}", "1"),
+            failed.replace("{}", "2"),
+            failed.replace("{}", "3"),
+            out.display(),
+            url("/file")
+        )
+    );
+    assert_eq!(pauses, BACKOFF);
     assert_eq!(std::fs::read(&out).unwrap(), FILE);
 }
 
 #[test]
 fn run_uses_the_built_in_roots_and_reports_the_error() {
-    // Nothing listens on port 1: the connection is refused.
+    // The built-in roots do not vouch for the test CA: refused for good, so `run` never pauses.
     let args = s(&[
         "--url",
-        "https://127.0.0.1:1/x",
+        &url("/file"),
         "--sha256",
         &"0".repeat(64),
         "--out",
         "unused",
     ]);
-    assert!(
-        run(&args)
-            .unwrap_err()
-            .starts_with("https://127.0.0.1:1/x:")
+    let err = run(&args).unwrap_err();
+    let first = format!(
+        "no URL served unused:\nfetch: {0}: attempt 1 of 3: {0}: ",
+        url("/file")
     );
+    assert!(err.starts_with(&first), "{err}");
+    assert_eq!(err.lines().count(), 2, "{err}");
 }
