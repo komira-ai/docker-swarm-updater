@@ -19,7 +19,8 @@
 # `refs/heads/main`, started by `push`. The updater's config for its own service, and anyone
 # who verifies a release, names exactly that, so this file is never renamed or moved.
 #
-# Only `attest` holds `id-token: write` and `attestations: write`. While it holds them no
+# Only `attest` can sign: it is the one job with `attestations: write`, and holds it with
+# `id-token: write`. While it holds them no
 # repository code runs and nothing is built: pinned actions, two `sha256sum --check` and a `cp`
 # per bundle. The files reach it through the run's artifact store, where a job that ran
 # repository code could have replaced them, so it first refuses sums other than the ones
@@ -30,7 +31,7 @@
 # Then the release deploys itself to the control plane (the service `docker-swarm-updater`),
 # only while the repository variable CP_DEPLOY_ENDPOINT is not empty: with it unset or empty,
 # `deploy-digest` and `deploy` are skipped and the run ends at `publish`. See the comment above
-# the two jobs. `deploy` is the only other job with `id-token: write`, and it holds nothing else.
+# the two jobs. `deploy` holds `id-token: write` alone and cannot sign.
 name: artifacts
 
 on:
@@ -368,8 +369,8 @@ jobs:
   #          the linux-x86_64 image, refuses sums other than the ones `sums` made and an image
   #          that differs from them, and outputs the manifest digest the image's index.json
   #          names and the release's addresses of the image and its bundle (`cargo xtask
-  #          release deploy-inputs`). The token is in the download step only, which runs no
-  #          repository code.
+  #          release deploy-inputs`). No step that runs repository code holds the token: it is in
+  #          the download step's environment, and the checkout keeps no credentials.
   # deploy   calls the reusable workflow deploy.yml of this repository at the commit the
   #          updater's allow-list names for `job_workflow_ref` (a full commit, with its version
   #          comment; a moved pin reaches the updater only once its config moves too), with

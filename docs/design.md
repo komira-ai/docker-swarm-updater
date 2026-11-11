@@ -452,8 +452,8 @@ after the hand-off for restarts, the size and free-space limits). A new error to
   tar: an OCI layout written by `cargo xtask release image`, `FROM scratch`, the binary at `/docker-swarm-updater` as the entrypoint,
   user `65532:65532`, every time the commit's, plus Docker's `manifest.json` so `docker load` reads it. Before signing it checks that
   the binary has no program interpreter and prints the version, that rebuilding the workspace's crates gives the same binary byte for
-  byte, that the image written twice is the same bytes, and that the image loads and runs. Only its `attest` job holds
-  `id-token: write` and `attestations: write`, and runs no repository code; each binary and image gets its own `.sigstore.json`, which
+  byte, that the image written twice is the same bytes, and that the image loads and runs. Only its `attest` job can sign: it
+  alone holds `attestations: write`, with `id-token: write`, and runs no repository code; each binary and image gets its own `.sigstore.json`, which
   `verify` checks against this signer before `publish` creates the release. `artifacts.yml` is the signer identity, so it is never
   renamed.
 - **The release deploys itself.** After `publish`, and only while the repository variable `CP_DEPLOY_ENDPOINT` is not empty,

@@ -412,7 +412,7 @@ fn each_broken_deploy_boundary_is_named() {
             broken(|t| {
                 t.replacen(
                     "      service: docker-swarm-updater\n",
-                    "      service: kbf-frontend\n",
+                    "      service: other-service\n",
                     1,
                 )
             }),
