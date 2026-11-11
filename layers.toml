@@ -1,0 +1,32 @@
+# The layers of the workspace, bottom first. `cargo xtask layers` checks this file against
+# every crates/*/Cargo.toml, and a test in crates/xtask runs that check on this repository,
+# so `cargo test` enforces it.
+#
+# Rules:
+#   * Every workspace crate is named in exactly one layer; a layer may not name a crate that
+#     does not exist; layer names are unique.
+#   * A crate may depend (through [dependencies] and [build-dependencies]) only on workspace
+#     crates of its own layer or a lower one. Dev-dependencies are not held to this.
+#   * A `pure` layer holds crates with no I/O, no clock and no runtime. Each of its crates
+#     denies `clippy::disallowed_methods` and `clippy::disallowed_types` on one line in its
+#     lib root:
+#         #![deny(clippy::disallowed_methods, clippy::disallowed_types)]
+#     (clippy.toml lists the items), and depends on none of: tokio, hyper, hyper-util,
+#     rustls, tokio-rustls, getrandom, rand, mio, socket2, reqwest, ureq.
+
+[[layer]]
+name = "pure"
+pure = true
+crates = ["dsu-core"]
+
+[[layer]]
+name = "lib"
+crates = ["dsu-verify", "dsu-docker", "dsu-registry", "dsu-testkit"]
+
+[[layer]]
+name = "server"
+crates = ["dsu-server"]
+
+[[layer]]
+name = "app"
+crates = ["docker-swarm-updater", "xtask"]

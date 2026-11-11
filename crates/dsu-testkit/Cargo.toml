@@ -1,0 +1,46 @@
+[package]
+name = "dsu-testkit"
+description = "Test support for docker-swarm-updater: a test Sigstore signing chain, OCI tars, and fake Docker, registry and release servers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Coverage floors of this crate, read by `cargo xtask coverage` (never below 99).
+[package.metadata.coverage]
+lines = 99.0
+branches = 99.0
+
+[dependencies]
+dsu-core.workspace = true
+rcgen.workspace = true
+aws-lc-rs.workspace = true
+cms.workspace = true
+x509-cert.workspace = true
+der.workspace = true
+const-oid.workspace = true
+sigstore-verify.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+sha2.workspace = true
+hex.workspace = true
+tar.workspace = true
+tokio.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+http-body-util.workspace = true
+http.workspace = true
+bytes.workspace = true
+rustls.workspace = true
+rustls-pki-types.workspace = true
+tokio-rustls.workspace = true
+tempfile.workspace = true
+jiff.workspace = true
+
+[dev-dependencies]

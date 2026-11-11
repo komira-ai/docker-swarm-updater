@@ -1,0 +1,6 @@
+# nextest profiles. `coverage` is the profile of the CI `test` job (cargo llvm-cov nextest):
+# every test runs, a failure does not stop the others, and nothing is retried, so a flaky
+# test is a failing test.
+[profile.coverage]
+fail-fast = false
+retries = 0

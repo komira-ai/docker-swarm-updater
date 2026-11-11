@@ -1,0 +1,31 @@
+[package]
+name = "dsu-verify"
+description = "Offline Sigstore bundle verification with the signer-identity and subject checks of docker-swarm-updater"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# Coverage floors of this crate, read by `cargo xtask coverage` (never below 99).
+[package.metadata.coverage]
+lines = 99.0
+branches = 99.0
+
+[dependencies]
+dsu-core.workspace = true
+sigstore-verify.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64.workspace = true
+hex.workspace = true
+jiff.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+dsu-testkit.workspace = true
+sha2.workspace = true
