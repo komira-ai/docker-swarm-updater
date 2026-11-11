@@ -295,14 +295,21 @@ daemon's classic image store re-creates manifests on push, so the digest would n
 
 ### 3.5 Update and wait
 
-1. Read the Swarm service (`GET /services/{id}`); keep its `Version.Index`, its `UpdateStatus` and the time.
+1. Read the Swarm service (`GET /services/{id}`) and its running tasks; keep its `Version.Index`, its `UpdateStatus` and the time.
+   If Swarm already runs the image (the spec names `<registry>/<repository>@<image_digest>`, every running task runs it, and the
+   `UpdateStatus` is absent or terminal, so no update is moving tasks), no update is asked for: the deploy is `converged` (step 4)
+   and its record says so. An update would change only the labels, and Swarm starts no rollout and writes no `UpdateStatus` for a
+   spec whose task template is unchanged, so a wait for one would never end.
 2. `POST /services/{id}/update?version=<index>` with **the spec just read, changed in exactly three places**: `TaskTemplate.ContainerSpec.Image
    = <registry>/<repository>@<image_digest>` and two service labels, `org.docker-swarm-updater.deploy` (the deploy id) and
    `org.docker-swarm-updater.digest`. A version conflict is retried once after a fresh read; a second is `swarm_refused`.
 3. Poll every 2 s. An `UpdateStatus` counts only once it belongs to this update: `Version.Index` is past the one read in step 1 and
-   `UpdateStatus.StartedAt` is later than step 1's time; a terminal state left by an earlier update is ignored. Then: `completed` with every running task on the new image and none on another is `converged`; `rollback_completed` is
+   `UpdateStatus.StartedAt` is later than step 1's time; a terminal state left by an earlier update is ignored. A status of this update
+   decides: `completed` with every running task on the new image and none on another is `converged`; `rollback_completed` is
    `rolled_back`; `paused` or `rollback_paused` is `paused` (a person must look); `converge_timeout_secs` passed (when non-zero) is
-   `timeout`, and the update is left to Swarm. The task states and their errors go into the record's last step.
+   `timeout`, and the update is left to Swarm. Without a status of this update, a Swarm that runs the new image as step 1 defines it
+   is `converged`: an update that changed only the labels clears `UpdateStatus` and starts no rollout. The task states and their
+   errors go into the record's last step.
 4. On `converged`: the service's signed-time floor becomes this `signed_time`; every manifest of the repository that is neither
    running, nor in Swarm's `PreviousSpec`, nor among the last `keep_previous` converged digests is deleted by digest. Blobs are freed by
    the registry's own garbage collection, which needs the registry read-only and is the operator's [E] (distribution's garbage-collection
@@ -320,7 +327,8 @@ daemon's classic image store re-creates manifests on push, so the digest would n
 - **A restart** reads every record in state `running`. In phases `queued` to `pushing`, nothing in Swarm changed: `failed`
   `interrupted`, and the caller may ask again. In `updating`, `waiting` or `handed_off`, it reads the service's `UpdateStatus` with the
   rule of 3.5 step 3 against the record's start: `rollback_completed` is `rolled_back`; `completed` with the record's digest running is
-  `converged`; `updating` resumes the wait; a spec that no Swarm update of this record explains (another deploy label and no update
+  `converged`, and so is a Swarm that runs the record's image with no update in flight and no status after the record's start;
+  `updating` resumes the wait; a spec that no Swarm update of this record explains (another deploy label and no update
   status after the record's start) is `failed` `interrupted`.
 - **Self-update.** At start the updater reads its own service from its task's labels. A deploy of that service runs 3.1 to 3.4, requires
   that no other deploy runs, writes phase `handed_off`, then asks Swarm for the update. Swarm stops this task (stop-first) and starts the
@@ -387,8 +395,9 @@ in for the certificate authority, a test log key and timestamp key), so good, ta
 not fetched. Real-world compatibility is the fixture test of 5.1. No test reads a duration from the real clock.
 
 - **Fake Docker API**: services with `Spec`, `Version`, `UpdateStatus` (with `StartedAt`), `PreviousSpec` and tasks; a script per test
-  says how an update goes (converges, rolls back, pauses, never ends, conflicts on version, refuses, keeps a stale terminal state), and it
-  records every update body it received.
+  says how an update goes (converges, rolls back, pauses, never ends, conflicts on version, refuses, is answered 200 and dropped, keeps a
+  stale terminal state), an update that leaves the task template unchanged clears the status and starts no rollout unless a task runs
+  another image (as in Swarm), the task list can fail, and it records every update body it received.
 - **Fake release server**: HTTPS on loopback with the test CA (`--ca-file`); files, redirects (allowed host, other host, `http`, a loop,
   six hops), errors, a short body, a stalled read. The fake resolver maps the allowed host names to a documentation address
   (203.0.113.10) and others to private or loopback addresses; the fake connector dials 203.0.113.10 to the server's loopback port, so the
@@ -412,7 +421,7 @@ not fetched. Real-world compatibility is the fixture test of 5.1. No test reads 
 | failed list | after `bundle_signer` with the right digest; after `digest_mismatch`; clear by the operator; clear through the proxy | retry 409 `previously_failed`; retry runs; 204 and the next deploy runs; 403 |
 | downgrade | signed earlier than the running release, by a caller; by the operator with `allow_older` | `older_than_running`; `converged`, record says so |
 | registry | upload fails; answers another digest | `registry_failed`; Swarm untouched |
-| Swarm | rolls back; pauses; timeout set and never completes (fake clock); timeout 0 and completes late; version conflict once, twice; a stale `rollback_completed` from an earlier update before this one starts | `rolled_back` and digest in the failed list; `paused`; `timeout`, no rollback call; `converged`; `converged`, `swarm_refused`; ignored, then `converged` |
+| Swarm | rolls back; pauses; timeout set and never completes (fake clock); timeout 0 and completes late; version conflict once, twice; a stale `rollback_completed` from an earlier update before this one starts; already runs the image on every task; already names the image while an earlier update still moves a task, so the update starts no rollout; a restart after such an update, with no `UpdateStatus`; answers the update 200 and changes nothing | `rolled_back` and digest in the failed list; `paused`; `timeout`, no rollback call; `converged`; `converged`, `swarm_refused`; ignored, then `converged`; `converged` with no update asked for, the service free; `converged` once the earlier update settles; `converged` at start; `failed` `interrupted`, the service free |
 | restart | in `fetching`; in `waiting` while Swarm still updates; after Swarm completed; after Swarm rolled back; with a spec changed by hand | `failed interrupted`; resumes to `converged`; `converged`; `rolled_back`; `failed interrupted` |
 | self-update | converges; new image unhealthy and Swarm rolls back; asked while another deploy runs; another deploy asked while it runs | new task settles `converged`; old image's task settles `rolled_back`; 409 `self_update_busy`; 409 `self_update_busy` |
 | local operator | Deploy with no claims as uid 0 | runs for any service; record's caller `operator (uid 0)` |

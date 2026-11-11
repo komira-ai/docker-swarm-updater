@@ -1,6 +1,8 @@
 //! A fake Docker Engine API on a Unix socket (docs/design.md section 6): services with a
 //! spec, a version, an update status, a previous spec and tasks; a script saying how the
-//! next update goes; a record of every update body received. Time is set by the test.
+//! next update goes; a record of every update body received. Time is set by the test. As
+//! Swarm, an update that leaves the task template as it was clears the status and starts no
+//! rollout unless a task still runs another image.
 
 use std::collections::BTreeMap;
 use std::convert::Infallible;
@@ -33,6 +35,9 @@ pub enum Outcome {
     NeverEnds,
     /// The update is refused with status 500 and this message; the service is unchanged.
     Refuses(String),
+    /// The update is answered 200 and dropped: the spec, the version and the status are
+    /// unchanged.
+    Ignores,
 }
 
 /// How updates go.
@@ -198,6 +203,7 @@ pub struct RecordedUpdate {
 struct State {
     now: Timestamp,
     ping_status: u16,
+    tasks_status: u16,
     script: UpdateScript,
     conflicts_left: u32,
     services: Vec<FakeService>,
@@ -230,6 +236,7 @@ impl FakeDocker {
         let state: Shared = Arc::new(Mutex::new(State {
             now,
             ping_status: 200,
+            tasks_status: 200,
             script: UpdateScript::new(Outcome::Converges),
             conflicts_left: 0,
             services: Vec::new(),
@@ -278,6 +285,11 @@ impl FakeDocker {
         self.lock().ping_status = status;
     }
 
+    /// Sets the status `GET /tasks` answers with; any other than 200 answers an error.
+    pub fn set_tasks_status(&self, status: u16) {
+        self.lock().tasks_status = status;
+    }
+
     /// Sets how updates go from now on.
     pub fn set_script(&self, script: UpdateScript) {
         let mut state = self.lock();
@@ -308,6 +320,31 @@ impl FakeDocker {
             .find(|s| s.is(name_or_id))
             .unwrap()
             .tasks = tasks;
+    }
+
+    /// Sets the image of the spec of the service with this name or id (its tasks are set
+    /// with [`FakeDocker::set_tasks`]).
+    pub fn set_image(&self, name_or_id: &str, image: &str) {
+        self.lock()
+            .services
+            .iter_mut()
+            .find(|s| s.is(name_or_id))
+            .unwrap()
+            .spec["TaskTemplate"]["ContainerSpec"]["Image"] = Value::String(image.to_owned());
+    }
+
+    /// Starts an update of the service with this name or id that someone else asked for at
+    /// `started_at`: from the next read it goes as the script says, like an accepted update.
+    pub fn begin_update(&self, name_or_id: &str, started_at: Timestamp) {
+        self.lock()
+            .services
+            .iter_mut()
+            .find(|s| s.is(name_or_id))
+            .unwrap()
+            .pending = Some(Pending {
+            started_at,
+            reads: 0,
+        });
     }
 
     /// Sets the status of the service with this name or id.
@@ -394,6 +431,9 @@ async fn handle(state: &Shared, request: Request<Incoming>) -> Response<Full<Byt
             .unwrap(),
         (&Method::GET, ["services", key]) => inspect(&mut state, key),
         (&Method::POST, ["services", key, "update"]) => update(&mut state, key, query, &body),
+        (&Method::GET, ["tasks"]) if state.tasks_status != 200 => {
+            message(state.tasks_status, "tasks are not available")
+        }
         (&Method::GET, ["tasks"]) => tasks(&state, query),
         (&Method::GET, ["containers", host, "json"]) => match state.containers.get(*host) {
             Some(labels) => reply(200, &json!({"Config": {"Labels": labels}})),
@@ -456,7 +496,7 @@ fn advance(service: &mut FakeService, script: &UpdateScript, reads: u32, started
             );
             service.pending = None;
         }
-        Outcome::NeverEnds | Outcome::Refuses(_) => {}
+        Outcome::NeverEnds | Outcome::Refuses(_) | Outcome::Ignores => {}
     }
 }
 
@@ -493,12 +533,29 @@ fn update(state: &mut State, key: &str, query: &str, body: &[u8]) -> Response<Fu
     if version != service.index {
         return message(500, "update out of sequence");
     }
+    if state.script.outcome == Outcome::Ignores {
+        return reply(200, &json!({"Warnings": null}));
+    }
+    let rolls_out = new_spec.get("TaskTemplate") != service.spec.get("TaskTemplate");
     service.previous_spec = Some(std::mem::replace(&mut service.spec, new_spec));
     service.index += 1;
-    service.pending = Some(Pending {
-        started_at: state.now,
-        reads: 0,
-    });
+    if rolls_out {
+        service.pending = Some(Pending {
+            started_at: state.now,
+            reads: 0,
+        });
+    } else {
+        // As Swarm: a spec whose task template is unchanged (only service labels differ)
+        // clears the status and starts no rollout, unless a task still runs another image,
+        // whose replacement starts again now.
+        let image = service.image();
+        let dirty = service.tasks.iter().any(|t| t.image != image);
+        service.update_status = None;
+        service.pending = dirty.then_some(Pending {
+            started_at: state.now,
+            reads: 0,
+        });
+    }
     reply(200, &json!({"Warnings": null}))
 }
 
