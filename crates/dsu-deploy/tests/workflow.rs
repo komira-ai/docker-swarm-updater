@@ -136,20 +136,27 @@ impl Contexts {
         }
     }
 
-    /// An `if:` of terms `<ref> == ''` or `<ref> != ''` joined by `||`.
+    /// An `if:` of terms `<ref> == ''` or `<ref> != ''`, joined by `&&` into groups and the
+    /// groups by `||` (GitHub's `&&` binds tighter than `||`; no parentheses).
     fn condition(&self, raw: &str) -> bool {
         let inner = raw
             .strip_prefix("${{ ")
             .and_then(|r| r.strip_suffix(" }}"))
             .unwrap_or_else(|| panic!("the runner does not know the condition {raw}"));
-        inner.split(" || ").any(|term| {
-            if let Some(r) = term.strip_suffix(" == ''") {
-                self.get(r).is_empty()
-            } else if let Some(r) = term.strip_suffix(" != ''") {
-                !self.get(r).is_empty()
-            } else {
-                panic!("the runner does not know the term {term}")
-            }
+        assert!(
+            !inner.contains(['(', ')']),
+            "the runner does not know the condition {raw}"
+        );
+        inner.split(" || ").any(|group| {
+            group.split(" && ").all(|term| {
+                if let Some(r) = term.strip_suffix(" == ''") {
+                    self.get(r).is_empty()
+                } else if let Some(r) = term.strip_suffix(" != ''") {
+                    !self.get(r).is_empty()
+                } else {
+                    panic!("the runner does not know the term {term}")
+                }
+            })
         })
     }
 }
@@ -163,6 +170,8 @@ struct Run {
     commands: Vec<String>,
     /// The job's result: `Ok` when every step passed, else the failing step's name.
     result: Result<(), String>,
+    /// The error annotation a refusing step printed (`echo "::error::<text>" && exit 1`).
+    refusal: Option<String>,
     /// The client's standard output.
     client_output: String,
 }
@@ -175,6 +184,7 @@ fn run_job(workflow: &Value, contexts: &Contexts, token_url: &str) -> Run {
         actions: BTreeMap::new(),
         commands: Vec::new(),
         result: Ok(()),
+        refusal: None,
         client_output: String::new(),
     };
     let mut checkout: Option<String> = None;
@@ -203,6 +213,19 @@ fn run_job(workflow: &Value, contexts: &Contexts, token_url: &str) -> Run {
         }
         let command = text(&step["run"]);
         if command == "exit 1" {
+            run.result = Err(name);
+            return run;
+        }
+        // A refusal: one literal annotation, then the step fails.
+        if let Some(annotation) = command
+            .strip_prefix("echo \"::error::")
+            .and_then(|c| c.strip_suffix("\" && exit 1"))
+        {
+            assert!(
+                !annotation.contains(['"', '$', '`', '\\']),
+                "{name} prints more than a literal annotation"
+            );
+            run.refusal = Some(annotation.to_owned());
             run.result = Err(name);
             return run;
         }
@@ -411,6 +434,81 @@ fn the_callers_signer_wait_and_tailnet_inputs_reach_their_steps() {
         body["signer"],
         json!({"repository": "example-org/builds", "workflow": ".github/workflows/sign.yml", "ref": "refs/heads/release"})
     );
+}
+
+/// A client id with the audience or the tags empty: the job stops before the join, naming
+/// the empty input, and sends nothing.
+#[test]
+fn a_tailnet_join_missing_its_audience_or_tags_stops_naming_the_input() {
+    let workflow = workflow();
+    let server = updater("converged", None);
+    let endpoint = server.url("");
+    let audience = (
+        "Refuse a tailnet join without tailscale-audience",
+        "tailscale-oauth-client-id is set but tailscale-audience is empty; give the audience of that Tailscale workload-identity client",
+    );
+    let tags = (
+        "Refuse a tailnet join without tailscale-tags",
+        "tailscale-oauth-client-id is set but tailscale-tags is empty; give the tags the job's tailnet node takes, comma-separated",
+    );
+    let cases = [
+        // The variable for the tags unset: what the caller in artifacts.yml would send.
+        (
+            vec![
+                ("tailscale-oauth-client-id", "client-id"),
+                ("tailscale-audience", "ts-audience"),
+                ("tailscale-tags", ""),
+            ],
+            tags,
+        ),
+        // The input left out: its default is empty.
+        (
+            vec![
+                ("tailscale-oauth-client-id", "client-id"),
+                ("tailscale-audience", "ts-audience"),
+            ],
+            tags,
+        ),
+        (
+            vec![
+                ("tailscale-oauth-client-id", "client-id"),
+                ("tailscale-tags", "tag:deploy"),
+            ],
+            audience,
+        ),
+        // Both empty: the audience is named first.
+        (vec![("tailscale-oauth-client-id", "client-id")], audience),
+    ];
+    for (extra, (step, annotation)) in cases {
+        let contexts = Contexts::resolve(&workflow, &with(&endpoint, &extra));
+        let run = run_job(&workflow, &contexts, &server.url("/token"));
+        assert_eq!(run.result, Err(step.to_owned()), "{extra:?}");
+        assert_eq!(run.refusal.as_deref(), Some(annotation), "{extra:?}");
+        assert!(
+            run.actions.is_empty() && run.commands.is_empty(),
+            "{extra:?}"
+        );
+    }
+    assert!(server.seen().is_empty());
+}
+
+/// Without a client id there is no join, whatever the other two hold: the job deploys
+/// without one, as it does with none of the three.
+#[test]
+fn audience_and_tags_without_a_client_id_join_nothing_and_deploy() {
+    let workflow = workflow();
+    let server = updater("converged", None);
+    let endpoint = server.url("");
+    let extra = [
+        ("tailscale-audience", "ts-audience"),
+        ("tailscale-tags", "tag:deploy"),
+    ];
+    let contexts = Contexts::resolve(&workflow, &with(&endpoint, &extra));
+    let run = run_job(&workflow, &contexts, &server.url("/token"));
+    assert_eq!(run.result, Ok(()), "{}", run.client_output);
+    assert_eq!(run.refusal, None);
+    assert!(!run.actions.contains_key("tailscale/github-action"));
+    assert_eq!(run.commands.last().map(String::as_str), Some("dsu-deploy"));
 }
 
 #[test]

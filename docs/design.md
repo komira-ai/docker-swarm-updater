@@ -456,19 +456,20 @@ after the hand-off for restarts, the size and free-space limits). A new error to
   alone holds `attestations: write`, with `id-token: write`, and runs no repository code; each binary and image gets its own `.sigstore.json`, which
   `verify` checks against this signer before `publish` creates the release. `artifacts.yml` is the signer identity, so it is never
   renamed.
-- **The release deploys itself.** After `publish`, and only while the repository variable `CP_DEPLOY_ENDPOINT` is not empty,
+- **The release deploys itself.** After `publish`, and only while the repository variables `CP_DEPLOY_ENDPOINT` and
+  `CP_DEPLOY_TAILSCALE_TAGS` are not empty,
   `deploy-digest` (`contents: read`) downloads the release's `SHA256SUMS` and linux-x86_64 image, holds them to the sums the run made,
   and outputs the manifest digest of the image's `index.json` and the release's addresses of the image and its bundle (`cargo xtask
   release deploy-inputs`); then `deploy` calls the reusable workflow below, pinned to the commit the updater's allow-list names for
   `job_workflow_ref`, for the service `docker-swarm-updater` in the environment `controlplane`, with the default signer. `deploy`
   holds `id-token: write` and nothing else; a token minted there cannot sign a release, because its certificate names `deploy.yml`,
   not `artifacts.yml`, as the signer workflow, and the job has no `attestations: write`. The deploy is a self-update (section 3.6).
-  With the variable unset or empty both jobs are skipped.
+  With either variable unset or empty both jobs are skipped.
 - **The reusable workflow** `.github/workflows/deploy.yml` (`on: workflow_call`). Inputs: `service`, `version`, `image-digest`,
   `image-url`, `bundle-url`, `signer-repository`, `signer-workflow`, `signer-ref` (the last three default to the caller's repository,
   `.github/workflows/artifacts.yml` and `refs/heads/main`), `endpoint`, `audience`, `environment`, `wait-minutes` (default 60),
-  `tailscale-oauth-client-id`, `tailscale-audience`, `tailscale-tags` (optional; Tailscale's workload identity needs the client id and
-  its audience). Its one
+  `tailscale-oauth-client-id`, `tailscale-audience`, `tailscale-tags` (optional; Tailscale's workload identity needs the client id,
+  its audience and the tags). Its one
   job declares `permissions: { id-token: write }` and `environment: ${{ inputs.environment }}` (a job that calls a reusable workflow
   cannot name an environment itself [E], GitHub's reusable-workflow reference), so the environment and its protection rules belong to
   the calling repository and the token's `environment` claim exists only once that job may run. The environment needs no required
@@ -477,7 +478,8 @@ after the hand-off for restarts, the size and free-space limits). A new error to
   runner), the attestation check, the signed-time floor and Swarm's rollback. The caller's job grants `id-token: write`. Steps: an
   optional network step (when `tailscale-oauth-client-id` is set, the job joins that Tailscale network as an ephemeral node with
   `tailscale/github-action`, pinned by commit, Tailscale itself pinned by version and SHA-256, before any call; when empty, the step is
-  skipped); then the client `dsu-deploy`, built from the workflow's own commit (the `job` context's `workflow_repository` and
+  skipped; with it set and `tailscale-audience` or `tailscale-tags` empty, the job fails before the join with an error naming the
+  empty input); then the client `dsu-deploy`, built from the workflow's own commit (the `job` context's `workflow_repository` and
   `workflow_sha`), which asks for a new OIDC token with `audience` for every request, sends Deploy, then Status every 10 s until a
   final state or `wait-minutes` (0: no limit), retrying a 503 or a connection failure on either. `converged` passes; any other final
   state fails the job with the record's error; `wait-minutes` passing fails it with "deploy <id> still running; it continues". One

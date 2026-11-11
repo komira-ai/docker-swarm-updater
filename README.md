@@ -48,10 +48,11 @@ prints the version, that rebuilding it gives the same bytes, that the image writ
 the same bytes, and that the image loads into Docker and runs.
 
 After the release is published, the same workflow deploys it to the service
-`docker-swarm-updater` through the reusable workflow below, while the repository variable
-`CP_DEPLOY_ENDPOINT` is set (the deploy front; `CP_DEPLOY_AUDIENCE` and
-`CP_DEPLOY_TAILSCALE_CLIENT_ID`, `CP_DEPLOY_TAILSCALE_AUDIENCE`, `CP_DEPLOY_TAILSCALE_TAGS` give
-the rest). With it unset or empty, the deploy jobs are skipped.
+`docker-swarm-updater` through the reusable workflow below, while the repository variables
+`CP_DEPLOY_ENDPOINT` (the deploy front) and `CP_DEPLOY_TAILSCALE_TAGS` (the tags of the job's
+tailnet node) are set; `CP_DEPLOY_AUDIENCE`, `CP_DEPLOY_TAILSCALE_CLIENT_ID` and
+`CP_DEPLOY_TAILSCALE_AUDIENCE` give the rest. With either unset or empty, the deploy jobs are
+skipped.
 
 The updater's own health check, in its service's `healthcheck.test`:
 `["CMD", "/docker-swarm-updater", "probe", "--unix", "<its socket>", "/v1/health"]`.
@@ -89,7 +90,7 @@ jobs:
 | `audience` | | the audience of every OIDC token, as the proxy expects it |
 | `environment` | | the calling repository's environment the job runs in |
 | `wait-minutes` | 60 | how long to wait for a final state; 0 waits however long it takes |
-| `tailscale-oauth-client-id`, `tailscale-audience`, `tailscale-tags` | empty | when the client id is set, the job first joins that tailnet as an ephemeral node with that Tailscale workload-identity client and those tags |
+| `tailscale-oauth-client-id`, `tailscale-audience`, `tailscale-tags` | empty | when the client id is set, the job first joins that tailnet as an ephemeral node with that Tailscale workload-identity client and those tags; with the client id set and the audience or the tags empty, the job fails before the join with an error naming the empty input |
 
 The job runs in the calling repository's environment, so that repository's environment rules
 apply and the token's `environment` claim names it; restrict the environment's deployment

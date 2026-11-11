@@ -8,10 +8,12 @@
 //!   only `sha256sum` and `cp`, so no repository code runs while it can sign; only `publish` can
 //!   write (`contents: write`), it checks out nothing and runs only `gh release create`; and
 //!   `publish` runs only after `verify`, which runs only after `attest`;
-//! - the release deploys itself only after `publish` and only while the repository variable
-//!   `CP_DEPLOY_ENDPOINT` is set: `deploy-digest` and `deploy` run only for a push to `main`
-//!   with that variable not empty ([`DEPLOY_IF`]); `deploy` holds only `id-token: write` and
-//!   calls exactly [`DEPLOY_WORKFLOW`] with exactly [`DEPLOY_WITH`]; the one step of
+//! - the release deploys itself only after `publish` and only while the repository variables
+//!   `CP_DEPLOY_ENDPOINT` and `CP_DEPLOY_TAILSCALE_TAGS` are set: `deploy-digest` and `deploy`
+//!   run only for a push to `main` with both not empty ([`DEPLOY_IF`]); `deploy` holds only
+//!   `id-token: write` and calls exactly [`DEPLOY_WORKFLOW`] with exactly [`DEPLOY_WITH`],
+//!   which takes each of the three Tailscale inputs from its own `CP_DEPLOY_TAILSCALE_*`
+//!   variable; the one step of
 //!   `deploy-digest` that holds the token runs only `gh release download`.
 //!
 //! [`violations`] is the check; the tests run it on the real files and on copies with one
@@ -41,8 +43,9 @@ const ARTIFACTS_JOBS: [(&str, &str); 8] = [
     ("deploy", "id-token: write"),
 ];
 
-/// The condition of `deploy-digest` and `deploy`: a push to main, and the deploy front set.
-const DEPLOY_IF: &str = "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.CP_DEPLOY_ENDPOINT != '' }}";
+/// The condition of `deploy-digest` and `deploy`: a push to main, the deploy front set, and the
+/// tags the job's tailnet node takes set (Tailscale refuses a join without them).
+const DEPLOY_IF: &str = "${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.CP_DEPLOY_ENDPOINT != '' && vars.CP_DEPLOY_TAILSCALE_TAGS != '' }}";
 
 /// The reusable workflow `deploy` calls, at the commit the updater's allow-list names for
 /// `job_workflow_ref`.
@@ -202,7 +205,7 @@ fn deploy_violations(jobs: &Value) -> Vec<String> {
     for name in ["deploy-digest", "deploy"] {
         if str_of(&jobs[name]["if"]) != DEPLOY_IF {
             out.push(format!(
-                "artifacts.yml: {name} is not limited to a push to main with CP_DEPLOY_ENDPOINT set"
+                "artifacts.yml: {name} is not limited to a push to main with CP_DEPLOY_ENDPOINT and CP_DEPLOY_TAILSCALE_TAGS set"
             ));
         }
     }
@@ -359,21 +362,34 @@ fn each_broken_boundary_is_named() {
 
 #[test]
 fn each_broken_deploy_boundary_is_named() {
-    let gate = "    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.CP_DEPLOY_ENDPOINT != '' }}\n";
+    let gate = "    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.CP_DEPLOY_ENDPOINT != '' && vars.CP_DEPLOY_TAILSCALE_TAGS != '' }}\n";
+    let without_tags = "    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.CP_DEPLOY_ENDPOINT != '' }}\n";
     let cases: Vec<(Value, &str)> = vec![
-        // The deploy jobs run without the variable, in deploy-digest and in deploy.
+        // The deploy jobs run without the variables, in deploy-digest and in deploy.
         (
             broken(|t| {
                 t.replacen(gate, "    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}\n", 1)
             }),
-            "artifacts.yml: deploy-digest is not limited to a push to main with CP_DEPLOY_ENDPOINT set",
+            "artifacts.yml: deploy-digest is not limited to a push to main with CP_DEPLOY_ENDPOINT and CP_DEPLOY_TAILSCALE_TAGS set",
         ),
         (
             broken(|t| {
                 let at = t.rfind(gate).unwrap();
                 format!("{}{}", &t[..at], &t[at + gate.len()..])
             }),
-            "artifacts.yml: deploy is not limited to a push to main with CP_DEPLOY_ENDPOINT set",
+            "artifacts.yml: deploy is not limited to a push to main with CP_DEPLOY_ENDPOINT and CP_DEPLOY_TAILSCALE_TAGS set",
+        ),
+        // The deploy jobs run with the deploy front set but the tailnet tags unset.
+        (
+            broken(|t| t.replacen(gate, without_tags, 1)),
+            "artifacts.yml: deploy-digest is not limited to a push to main with CP_DEPLOY_ENDPOINT and CP_DEPLOY_TAILSCALE_TAGS set",
+        ),
+        (
+            broken(|t| {
+                let at = t.rfind(gate).unwrap();
+                format!("{}{without_tags}{}", &t[..at], &t[at + gate.len()..])
+            }),
+            "artifacts.yml: deploy is not limited to a push to main with CP_DEPLOY_ENDPOINT and CP_DEPLOY_TAILSCALE_TAGS set",
         ),
         // deploy holds a scope beyond id-token: write.
         (
@@ -430,6 +446,58 @@ fn each_broken_deploy_boundary_is_named() {
         ),
         (
             broken(|t| t.replacen("      wait-minutes: 60\n", "", 1)),
+            "artifacts.yml: deploy does not send exactly the deploy inputs",
+        ),
+        // Each Tailscale input dropped, or taken from a variable other than its own: the
+        // reusable workflow would join the tailnet without it, or with another's value.
+        (
+            broken(|t| {
+                t.replacen(
+                    "      tailscale-oauth-client-id: ${{ vars.CP_DEPLOY_TAILSCALE_CLIENT_ID }}\n",
+                    "",
+                    1,
+                )
+            }),
+            "artifacts.yml: deploy does not send exactly the deploy inputs",
+        ),
+        (
+            broken(|t| {
+                t.replacen(
+                    "      tailscale-audience: ${{ vars.CP_DEPLOY_TAILSCALE_AUDIENCE }}\n",
+                    "",
+                    1,
+                )
+            }),
+            "artifacts.yml: deploy does not send exactly the deploy inputs",
+        ),
+        (
+            broken(|t| {
+                t.replacen(
+                    "      tailscale-tags: ${{ vars.CP_DEPLOY_TAILSCALE_TAGS }}\n",
+                    "",
+                    1,
+                )
+            }),
+            "artifacts.yml: deploy does not send exactly the deploy inputs",
+        ),
+        (
+            broken(|t| {
+                t.replacen(
+                    "      tailscale-tags: ${{ vars.CP_DEPLOY_TAILSCALE_TAGS }}\n",
+                    "      tailscale-tags: ${{ vars.CP_DEPLOY_TAILSCALE_AUDIENCE }}\n",
+                    1,
+                )
+            }),
+            "artifacts.yml: deploy does not send exactly the deploy inputs",
+        ),
+        (
+            broken(|t| {
+                t.replacen(
+                    "      tailscale-tags: ${{ vars.CP_DEPLOY_TAILSCALE_TAGS }}\n",
+                    "      tailscale-tags: \"\"\n",
+                    1,
+                )
+            }),
             "artifacts.yml: deploy does not send exactly the deploy inputs",
         ),
         // The order: the digest before the release is published, the deploy without it.
